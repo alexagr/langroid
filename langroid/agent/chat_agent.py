@@ -1888,7 +1888,8 @@ class ChatAgent(Agent):
 
         if self.llm.get_stream():
             self.callbacks.finish_llm_stream(
-                content=str(response),
+                content=response.message,
+                tools_content=response.tools_content(),
                 is_tool=self.has_tool_message_attempt(chat_doc),
             )
         self.llm.config.streamer = noop_fn
@@ -1947,7 +1948,8 @@ class ChatAgent(Agent):
 
         if self.llm.get_stream():
             self.callbacks.finish_llm_stream(
-                content=str(response),
+                content=response.message,
+                tools_content=response.tools_content(),
                 is_tool=self.has_tool_message_attempt(chat_doc),
             )
         self.llm.config.streamer_async = async_noop_fn
@@ -1984,8 +1986,15 @@ class ChatAgent(Agent):
             # TODO: prepend TOOL: or OAI-TOOL: if it's a tool-call
             if not settings.quiet:
                 print(cached + "[green]" + escape(str(response)))
+            if response is not None:
+                content = response.message
+                tools_content = response.tools_content()
+            else:
+                content = chat_doc.content
+                tools_content = str(chat_doc)
             self.callbacks.show_llm_response(
-                content=str(response or chat_doc),
+                content=content,
+                tools_content=tools_content,
                 is_tool=self.has_tool_message_attempt(chat_doc),
                 cached=is_cached,
             )
@@ -2003,6 +2012,7 @@ class ChatAgent(Agent):
                 print("[grey37]SOURCES:\n" + escape(citation) + "[/grey37]")
             self.callbacks.show_llm_response(
                 content=str(citation),
+                tools_content="",
                 is_tool=False,
                 cached=False,
                 language="text",
