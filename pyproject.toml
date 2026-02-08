@@ -1,6 +1,6 @@
 [project]
 name = "langroid"
-version = "0.59.33"
+version = "0.59.33-1"
 authors = [
     {name = "Prasad Chalasani", email = "pchalasani@gmail.com"},
 ]
@@ -78,7 +78,7 @@ hf-transformers = [
     "sentence-transformers<3.0.0,>=2.2.2",
     "torch<3.0.0,>=2.0.0",
     "transformers<5.0.0,>=4.40.1",
-    "huggingface-hub<1.0.0,>=0.21.2",    
+    "huggingface-hub<1.0.0,>=0.21.2",
 ]
 
 vecdbs = [
@@ -229,7 +229,7 @@ tavily = [
 ]
 
 chainlit = [
-    "chainlit<3.0.0,>=2.0.1",    
+    "chainlit<3.0.0,>=2.0.1",
     "python-socketio<6.0.0,>=5.11.0",
 ]
 
