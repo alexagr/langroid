@@ -4,16 +4,20 @@ Client caching/singleton pattern for LLM clients to prevent connection pool exha
 
 import atexit
 import hashlib
+import threading
+import time
 import weakref
-from typing import Any, Dict, Optional, Union, cast
+from typing import Any, Dict, Optional, Tuple, Union, cast
 
 from cerebras.cloud.sdk import AsyncCerebras, Cerebras
 from groq import AsyncGroq, Groq
 from httpx import Timeout
 from openai import AsyncOpenAI, OpenAI
 
-# Cache for client instances, keyed by hashed configuration parameters
-_client_cache: Dict[str, Any] = {}
+# Cache for client instances, keyed by hashed configuration parameters.
+# Value is a tuple of (client instance, last_used_monotonic_seconds).
+_client_cache: Dict[str, Tuple[Any, float]] = {}
+_client_cache_lock = threading.RLock()
 
 # Keep track of clients for cleanup
 _all_clients: weakref.WeakSet[Any] = weakref.WeakSet()
@@ -41,6 +45,18 @@ def _get_cache_key(client_type: str, **kwargs: Any) -> str:
     hashed_key = hashlib.sha256(raw_key.encode()).hexdigest()
 
     return hashed_key
+
+
+def _get_cached_client(cache_key: str) -> Optional[Any]:
+    """Get cached client and refresh its last-used timestamp."""
+    with _client_cache_lock:
+        entry = _client_cache.get(cache_key)
+        if entry is None:
+            return None
+
+        client, _ = entry
+        _client_cache[cache_key] = (client, time.monotonic())
+        return client
 
 
 def get_openai_client(
@@ -106,8 +122,9 @@ def get_openai_client(
         http_client_config=http_client_config,  # Include config in cache key
     )
 
-    if cache_key in _client_cache:
-        return cast(OpenAI, _client_cache[cache_key])
+    cached_client = _get_cached_client(cache_key)
+    if cached_client is not None:
+        return cast(OpenAI, cached_client)
 
     client = OpenAI(
         api_key=api_key,
@@ -118,7 +135,8 @@ def get_openai_client(
         http_client=created_http_client,  # Use the client created from config
     )
 
-    _client_cache[cache_key] = client
+    with _client_cache_lock:
+        _client_cache[cache_key] = (client, time.monotonic())
     _all_clients.add(client)
     return client
 
@@ -186,8 +204,9 @@ def get_async_openai_client(
         http_client_config=http_client_config,  # Include config in cache key
     )
 
-    if cache_key in _client_cache:
-        return cast(AsyncOpenAI, _client_cache[cache_key])
+    cached_client = _get_cached_client(cache_key)
+    if cached_client is not None:
+        return cast(AsyncOpenAI, cached_client)
 
     client = AsyncOpenAI(
         api_key=api_key,
@@ -198,7 +217,8 @@ def get_async_openai_client(
         http_client=created_http_client,  # Use the client created from config
     )
 
-    _client_cache[cache_key] = client
+    with _client_cache_lock:
+        _client_cache[cache_key] = (client, time.monotonic())
     _all_clients.add(client)
     return client
 
@@ -215,11 +235,13 @@ def get_groq_client(api_key: str) -> Groq:
     """
     cache_key = _get_cache_key("groq", api_key=api_key)
 
-    if cache_key in _client_cache:
-        return cast(Groq, _client_cache[cache_key])
+    cached_client = _get_cached_client(cache_key)
+    if cached_client is not None:
+        return cast(Groq, cached_client)
 
     client = Groq(api_key=api_key)
-    _client_cache[cache_key] = client
+    with _client_cache_lock:
+        _client_cache[cache_key] = (client, time.monotonic())
     _all_clients.add(client)
     return client
 
@@ -236,11 +258,13 @@ def get_async_groq_client(api_key: str) -> AsyncGroq:
     """
     cache_key = _get_cache_key("async_groq", api_key=api_key)
 
-    if cache_key in _client_cache:
-        return cast(AsyncGroq, _client_cache[cache_key])
+    cached_client = _get_cached_client(cache_key)
+    if cached_client is not None:
+        return cast(AsyncGroq, cached_client)
 
     client = AsyncGroq(api_key=api_key)
-    _client_cache[cache_key] = client
+    with _client_cache_lock:
+        _client_cache[cache_key] = (client, time.monotonic())
     _all_clients.add(client)
     return client
 
@@ -257,11 +281,13 @@ def get_cerebras_client(api_key: str) -> Cerebras:
     """
     cache_key = _get_cache_key("cerebras", api_key=api_key)
 
-    if cache_key in _client_cache:
-        return cast(Cerebras, _client_cache[cache_key])
+    cached_client = _get_cached_client(cache_key)
+    if cached_client is not None:
+        return cast(Cerebras, cached_client)
 
     client = Cerebras(api_key=api_key)
-    _client_cache[cache_key] = client
+    with _client_cache_lock:
+        _client_cache[cache_key] = (client, time.monotonic())
     _all_clients.add(client)
     return client
 
@@ -278,13 +304,43 @@ def get_async_cerebras_client(api_key: str) -> AsyncCerebras:
     """
     cache_key = _get_cache_key("async_cerebras", api_key=api_key)
 
-    if cache_key in _client_cache:
-        return cast(AsyncCerebras, _client_cache[cache_key])
+    cached_client = _get_cached_client(cache_key)
+    if cached_client is not None:
+        return cast(AsyncCerebras, cached_client)
 
     client = AsyncCerebras(api_key=api_key)
-    _client_cache[cache_key] = client
+    with _client_cache_lock:
+        _client_cache[cache_key] = (client, time.monotonic())
     _all_clients.add(client)
     return client
+
+
+def prune_cache(max_age_seconds: float) -> int:
+    """
+    Clear cache entries older than the specified age.
+
+    Args:
+        max_age_seconds: Maximum age (in seconds) for cache entries to keep.
+            Entries older than this value are removed.
+
+    Returns:
+        Number of cache entries removed.
+    """
+    if max_age_seconds < 0:
+        raise ValueError("max_age_seconds must be non-negative")
+
+    now = time.monotonic()
+    with _client_cache_lock:
+        stale_entries = [
+            key
+            for key, (_, last_used_at) in _client_cache.items()
+            if now - last_used_at > max_age_seconds
+        ]
+
+        for key in stale_entries:
+            _client_cache.pop(key, None)
+
+    return len(stale_entries)
 
 
 def _cleanup_clients() -> None:
@@ -316,4 +372,5 @@ atexit.register(_cleanup_clients)
 # For testing purposes
 def _clear_cache() -> None:
     """Clear the client cache. Only for testing."""
-    _client_cache.clear()
+    with _client_cache_lock:
+        _client_cache.clear()
