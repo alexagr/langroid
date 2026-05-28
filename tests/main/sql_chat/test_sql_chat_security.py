@@ -133,6 +133,41 @@ def test_dangerous_patterns_blocked(session, query):
     assert "REJECTED" in rejection
 
 
+@pytest.mark.parametrize(
+    "query",
+    [
+        # PostgreSQL: the pg_read_file / pg_stat_file / pg_ls_* /
+        # pg_current_logfile family yields the same file/metadata disclosure
+        # primitive as pg_read_server_file but uses different function names.
+        "SELECT pg_read_file('postgresql.conf')",
+        "SELECT pg_read_file('/etc/passwd')",
+        "SELECT pg_stat_file('postgresql.conf')",
+        "SELECT pg_ls_logdir()",
+        "SELECT pg_ls_waldir()",
+        "SELECT pg_ls_tmpdir()",
+        "SELECT pg_ls_archive_statusdir()",
+        "SELECT pg_current_logfile()",
+        # SQLite: the DATABASE keyword is optional in the ATTACH grammar.
+        "ATTACH '/etc/passwd' AS p",
+        # MSSQL: OPENDATASOURCE is the connection-string counterpart of
+        # OPENROWSET and can read remote/UNC files.
+        "SELECT * FROM OPENDATASOURCE('SQLNCLI11', 'Server=remote').db.sys.tables",
+    ],
+)
+def test_dangerous_pg_file_family_blocked(session, query):
+    agent = _make_agent(session)
+    rejection = agent._validate_query(query)
+    assert rejection is not None
+    assert "REJECTED" in rejection
+
+
+def test_benign_pg_functions_not_blocked(session):
+    """Non-disclosure pg_* functions must remain allowed (no over-match)."""
+    agent = _make_agent(session)
+    assert agent._validate_query("SELECT pg_typeof(1)") is None
+    assert agent._validate_query("SELECT pg_backend_pid()") is None
+
+
 def test_multi_statement_with_buried_drop_blocked(session):
     agent = _make_agent(session)
     rejection = agent._validate_query("SELECT 1; DROP TABLE items")

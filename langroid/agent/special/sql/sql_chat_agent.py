@@ -112,30 +112,41 @@ SQL_ERROR_MSG = "There was an error in your SQL Query"
 # sqlglot-based statement-type allowlist.
 _DANGEROUS_SQL_PATTERNS: List["re.Pattern[str]"] = [
     # PostgreSQL: COPY ... FROM/TO PROGRAM executes shell commands as the DB
-    # server OS user. This is the primitive used in CVE-2026-25879.
+    # server OS user.
     re.compile(r"\bcopy\b[\s\S]*\bprogram\b", re.IGNORECASE),
-    # PostgreSQL server-side filesystem access
-    re.compile(r"\bpg_read_server_files?\b", re.IGNORECASE),
-    re.compile(r"\bpg_read_binary_file\b", re.IGNORECASE),
-    re.compile(r"\bpg_ls_dir\b", re.IGNORECASE),
+    # PostgreSQL server-side filesystem / log / WAL access. Match the whole
+    # pg_read*, pg_stat*, pg_ls*, pg_current_logfile family rather than naming
+    # individual functions: near-name functions (pg_read_file vs
+    # pg_read_server_file, pg_ls_logdir vs pg_ls_dir, pg_stat_file, ...) all
+    # yield the same file/metadata disclosure primitive.
+    re.compile(
+        r"\bpg_(read|stat|ls|current_logfile)[A-Za-z0-9_]*\s*\(", re.IGNORECASE
+    ),
     re.compile(r"\blo_(import|export)\b", re.IGNORECASE),
     # MySQL/MariaDB filesystem
     re.compile(r"\binto\s+(outfile|dumpfile)\b", re.IGNORECASE),
     re.compile(r"\bload_file\s*\(", re.IGNORECASE),
     re.compile(r"\bload\s+data\b", re.IGNORECASE),
     # SQLite: load_extension enables loading arbitrary shared objects;
-    # ATTACH DATABASE can read/write arbitrary files.
+    # ATTACH can read/write arbitrary files. The DATABASE keyword is optional
+    # per the SQLite grammar (ATTACH [DATABASE] expr AS schema-name), so match
+    # both forms.
     re.compile(r"\bload_extension\s*\(", re.IGNORECASE),
-    re.compile(r"\battach\s+database\b", re.IGNORECASE),
-    # SQL Server: command execution and OLE automation
+    re.compile(r"\battach\b(\s+database)?\s+['\"\w]", re.IGNORECASE),
+    # SQL Server: command execution, OLE automation, and ad-hoc external data
+    # sources (OPENDATASOURCE is the connection-string counterpart of
+    # OPENROWSET; both can read remote/UNC files).
     re.compile(r"\bxp_cmdshell\b", re.IGNORECASE),
     re.compile(r"\bsp_oacreate\b", re.IGNORECASE),
     re.compile(r"\bsp_oamethod\b", re.IGNORECASE),
-    re.compile(r"\bopenrowset\b", re.IGNORECASE),
+    re.compile(r"\b(openrowset|opendatasource)\b", re.IGNORECASE),
     re.compile(r"\bbulk\s+insert\b", re.IGNORECASE),
-    # Generic: stored-program creation and procedural language extensions
+    # Generic: stored-program creation and procedural language extensions.
+    # LANGUAGE / RULE / EVENT TRIGGER / FOREIGN TABLE are additional PostgreSQL
+    # primitives that can register attacker-controlled code.
     re.compile(
-        r"\bcreate\s+(or\s+replace\s+)?(function|procedure|trigger)\b", re.IGNORECASE
+        r"\bcreate\s+(or\s+replace\s+)?(function|procedure|trigger|language|rule|event\s+trigger|foreign\s+table)\b",
+        re.IGNORECASE,
     ),
     re.compile(r"\bcreate\s+extension\b", re.IGNORECASE),
 ]
