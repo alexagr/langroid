@@ -377,6 +377,7 @@ issues/
   20251011-pr-926-description.md
   20251107-fix-mcp-dectorator.md
   20251123-new-model-support-gpt51-gemini30.md
+  20260601-qdrant-ci-local-container.md
   898-implementation.md
   html-logger-implementation.md
   html-logger.md
@@ -658,6 +659,7 @@ tests/
     test_pdf_utils.py
     test_prep_llm_message.py
     test_pydantic_utils.py
+    test_qdrant_lock_release.py
     test_quiet_mode.py
     test_recipient_tool_async.py
     test_recipient_tool.py
@@ -20803,6 +20805,35 @@ agent = lr.ChatAgent(
 ⋮----
 task_cfg = lr.TaskConfig(recognize_string_signals=False)
 task = lr.Task(agent, config=task_cfg, interactive=False)
+</file>
+
+<file path="examples/mcp/claude-code-mcp.py">
+"""
+Enable a Langroid agent to use all MCP Tools from 
+Claude Code's MCP server.
+
+
+Run like this (omitting the `--model` argument will use the default gpt-5-mini):
+
+    uv run examples/mcp/claude-code-mcp.py --model gpt-5-mini
+
+
+"""
+⋮----
+async def main(model: str = "")
+⋮----
+transport = StdioTransport(
+all_tools = await get_tools_async(transport)
+⋮----
+agent = lr.ChatAgent(
+⋮----
+# forward to user when LLM doesn't use a tool
+⋮----
+# enable the agent to use all tools
+⋮----
+# make task with interactive=False =>
+# waits for user only when LLM doesn't use a tool
+task = lr.Task(agent, interactive=False)
 </file>
 
 <file path="examples/mcp/exa-web-search.py">
@@ -41174,563 +41205,6 @@ docs = dataframe_to_documents(df, content="junk", metadata=[])
 assert docs[0].content == ""  # since `junk` is not a column in the dataframe
 </file>
 
-<file path="tests/main/test_doc_chat_agent.py">
-embed_cfg = OpenAIEmbeddingsConfig(
-⋮----
-class MyDocMetaData(DocMetaData)
-⋮----
-id: str
-⋮----
-class MyDoc(Document)
-⋮----
-content: str
-metadata: MyDocMetaData
-⋮----
-documents: List[Document] = [
-⋮----
-QUERY_EXPECTED_PAIRS = [
-⋮----
-@pytest.fixture(scope="function")
-def vecdb(test_settings: Settings, request) -> VectorStore
-⋮----
-qd_dir = ":memory:"
-qd_cfg = QdrantDBConfig(
-qd = QdrantDB(qd_cfg)
-⋮----
-qd_dir = ".qdrant/cloud/test-" + embed_cfg.model_type
-qd_cfg_cloud = QdrantDBConfig(
-qd_cloud = QdrantDB(qd_cfg_cloud)
-⋮----
-cd_dir = ".chroma/" + embed_cfg.model_type
-⋮----
-cd_cfg = ChromaDBConfig(
-cd = ChromaDB(cd_cfg)
-⋮----
-ldb_dir = ".lancedb/data/" + embed_cfg.model_type
-⋮----
-ldb_cfg = LanceDBConfig(
-⋮----
-document_class=MyDoc,  # IMPORTANT, to ensure table has full schema!
-⋮----
-ldb = LanceDB(ldb_cfg)
-⋮----
-class _TestDocChatAgentConfig(DocChatAgentConfig)
-⋮----
-cross_encoder_reranking_model: str = ""
-n_query_rephrases: int = 0
-debug: bool = False
-stream: bool = True  # allow streaming where needed
-conversation_mode: bool = True
-vecdb: VectorStoreConfig | None = None
-llm: OpenAIGPTConfig = OpenAIGPTConfig(
-⋮----
-n_similar_chunks: int = 3
-n_relevant_chunks: int = 3
-parsing: ParsingConfig = ParsingConfig(
-⋮----
-prompts: PromptsConfig = PromptsConfig(
-⋮----
-config = _TestDocChatAgentConfig()
-set_global(Settings(cache=True))  # allow cacheing
-⋮----
-@pytest.fixture(scope="function")
-def agent(test_settings: Settings, vecdb) -> DocChatAgent
-⋮----
-agent = DocChatAgent(config)
-⋮----
-# category=UserWarning,
-⋮----
-@pytest.mark.parametrize("query, expected", QUERY_EXPECTED_PAIRS)
-def test_doc_chat_agent_llm(test_settings: Settings, agent, query: str, expected: str)
-⋮----
-"""
-    Test directly using `llm_response` method of DocChatAgent.
-    """
-⋮----
-# note that the (query, ans) pairs are accumulated into the
-# internal dialog history of the agent.
-⋮----
-result = agent.llm_response(query)
-ans = result.content
-refs = extract_markdown_references(ans)
-sources = extract_markdown_references(result.metadata.source)
-⋮----
-expected = [e.strip() for e in expected.split(",")]
-⋮----
-"""
-    Test directly using `llm_response_async` method of DocChatAgent.
-    """
-⋮----
-ans = (await agent.llm_response_async(query)).content
-⋮----
-@pytest.mark.parametrize("query, expected", QUERY_EXPECTED_PAIRS)
-@pytest.mark.parametrize("vecdb", ["qdrant_local", "chroma"], indirect=True)
-def test_doc_chat_agent_task(test_settings: Settings, agent, query, expected)
-⋮----
-"""
-    Test DocChatAgent wrapped in a Task.
-    """
-⋮----
-task = Task(agent, restart=True)
-⋮----
-# LLM responds to Sys msg, initiates conv, says thank you, etc.
-⋮----
-task.step()  # user asks query
-task.step()  # LLM answers
-ans = task.pending_message.content.lower()
-⋮----
-class RetrievalAgent(DocChatAgent)
-⋮----
-# override the DocChatAgent's LLM response,
-# to just use ChatAgent's LLM response - this ensures that the system msg
-# is respected, and it uses the `retrieval_tool` as instructed.
-⋮----
-@pytest.fixture(scope="function")
-def retrieval_agent(test_settings: Settings, vecdb) -> RetrievalAgent
-⋮----
-agent = RetrievalAgent(config)
-⋮----
-task = Task(
-# 3 turns:
-# 1. LLM gen `retrieval_tool` request
-# 2. Agent gen `retrieval_tool` response (i.e. returns relevant passages)
-# 3. LLM gen answer based on passages
-ans = task.run(query, turns=3).content
-expected = [e.strip().lower() for e in expected.split(",")]
-⋮----
-@pytest.fixture(scope="function")
-def new_agent(test_settings: Settings, vecdb) -> DocChatAgent
-⋮----
-"""
-    Test whether follow-up question is handled correctly.
-    """
-⋮----
-restart=False,  # don't restart, so we can ask follow-up questions
-⋮----
-result = task.run("Who was Charlie Foster?")
-⋮----
-result = task.run("When was he born?")
-⋮----
-# test retain_context when conv_mode is True
-⋮----
-question = "Who was Charlie Foster?"
-response = new_agent.llm_response(question)
-⋮----
-# context is retained, i.e.,
-# the user msg has both extracted chunks and the question itself
-⋮----
-# context is not retained, i.e., the user msg has only the question
-⋮----
-"""
-    Test whether follow-up question is handled correctly (in async mode).
-    """
-⋮----
-result = await task.run_async("Who was Charlie Foster?")
-⋮----
-result = await task.run_async("When was he born?")
-⋮----
-response = await new_agent.llm_response_async(question)
-⋮----
-# setup config for retrieval test, with n_neighbor_chunks=2
-# and parser.n_neighbor_ids = 5
-class _MyDocChatAgentConfig(DocChatAgentConfig)
-⋮----
-n_neighbor_chunks: int = 2
-⋮----
-n_similar_chunks: int = 2
-n_relevant_chunks: int = 2
-⋮----
-"""
-    Test window retrieval of relevant doc-chunks.
-    Check that we are retrieving 2 neighbors around each match.
-    """
-agent = DocChatAgent(
-⋮----
-phrases = SimpleNamespace(
-text = "\n\n".join(vars(phrases).values())
-⋮----
-results = agent.get_relevant_chunks("What are giraffes like?")
-⋮----
-# All phrases except the CATS phrase should be in the results
-# since they are all within 2 chunks of a giraffe phrase.
-# (The CAT phrase is 3 chunks away, so it should not be in the results.)
-all_but_cats = [p for p in vars(phrases).values() if "Cats" not in p]
-# check that each phrases occurs in exactly one result
-⋮----
-@pytest.mark.parametrize("vecdb", ["qdrant_local", "chroma"], indirect=True)
-def test_doc_chat_rerank_diversity(test_settings: Settings, vecdb)
-⋮----
-"""
-    Test that reranking by diversity works.
-    """
-⋮----
-cfg = _MyDocChatAgentConfig(
-⋮----
-agent = DocChatAgent(cfg)
-⋮----
-docs = [
-reranked = agent.rerank_with_diversity(docs)
-⋮----
-# assert that each phrase tall, vegetarian, strange, fast
-# occurs exactly once in top 4 phrases
-⋮----
-@pytest.mark.parametrize("vecdb", ["qdrant_local", "chroma"], indirect=True)
-def test_reciprocal_rank_fusion(test_settings: Settings, vecdb)
-⋮----
-"""
-    Test that RRF (Reciprocal Rank Fusion) works.
-    """
-⋮----
-n_similar_docs=None,  # Ensure we don't trigger backward compatibility
-⋮----
-chunks = agent.get_relevant_chunks("I like to chase banks")
-⋮----
-chunks = agent.get_relevant_chunks("I like oranges")
-⋮----
-@pytest.mark.parametrize("vecdb", ["qdrant_local", "chroma"], indirect=True)
-def test_doc_chat_rerank_periphery(test_settings: Settings, vecdb)
-⋮----
-"""
-    Test that reranking to periphery works.
-    """
-⋮----
-reranked = agent.rerank_to_periphery(docs)
-numbers = [int(d.content) for d in reranked]
-⋮----
-data = {
-⋮----
-df = pd.DataFrame(data)
-⋮----
-"""Check we can ingest from a dataframe and run queries."""
-⋮----
-sys_msg = "You will be asked to answer questions based on short book descriptions."
-agent_cfg = DocChatAgentConfig(
-⋮----
-agent = LanceDocChatAgent(agent_cfg)
-⋮----
-agent = DocChatAgent(agent_cfg)
-⋮----
-response = agent.llm_response(
-⋮----
-"""Check we can ingest from a dataframe,
-    with additional fields inserted into content,
-    and run queries that refer to those fields."""
-⋮----
-sys_msg = "You will be asked to answer questions based on short movie descriptions."
-⋮----
-"""
-    Check that we are able ingest documents incrementally.
-    """
-⋮----
-sentences = list(vars(phrases).values())
-docs1 = [
-⋮----
-docs2 = [
-⋮----
-results = agent.get_relevant_chunks("What do we know about Pigs?")
-⋮----
-results = agent.get_relevant_chunks("What do we know about Hyenas?")
-⋮----
-"""
-    Test DocChatAgent.ingest_doc_paths
-    """
-⋮----
-# create temp files containing each sentence, using tempfile pkg
-⋮----
-metadata_dict: bool,  # whether metadata is dict or DocMetaData
-⋮----
-"""
-    Test DocChatAgent.ingest_doc_paths, with metadata
-    """
-⋮----
-# create a list of dicts, each containing a sentence about an animal
-# and a metadata field indicating the animal's name, species, and diet
-animals = [
-⋮----
-class AnimalMetadata(DocMetaData)
-⋮----
-name: str
-species: str
-diet: str
-⋮----
-animal_metadata_list = [AnimalMetadata(**a["metadata"]) for a in animals]
-⋮----
-# put each animal content in a separate file
-⋮----
-# ingest with per-file metadata
-⋮----
-# assert about metadata
-⋮----
-# clear out the agent docs and the underlying vecdb collection
-⋮----
-# ingest with single metadata for ALL animals
-⋮----
-results = agent.get_relevant_chunks("What do we know about dogs?")
-⋮----
-@pytest.mark.parametrize("vecdb", ["chroma", "lancedb", "qdrant_local"], indirect=True)
-def test_doc_chat_batch(test_settings: Settings, vecdb)
-⋮----
-"""
-    Test batch run of queries to multiple instances of DocChatAgent,
-    which share the same vector-db.
-    """
-⋮----
-doc_agents = [DocChatAgent(_MyDocChatAgentConfig()) for _ in range(2)]
-⋮----
-# attach a common vector-db to all agents
-⋮----
-# note we only need to ingest docs using one of the agents,
-# since they share the same vector-db
-⋮----
-questions = [
-⋮----
-# (1) test that we can create a single task and use run_batch_tasks
-task = Task(doc_agents[0], name="DocAgent", interactive=False, single_round=True)
-results = run_batch_tasks(task, questions)
-⋮----
-# (2) test that we can create a task-generator fn and use run_batch_task_gen
-⋮----
-# create a task-generator fn, to create one per question
-def gen_task(i: int)
-⋮----
-results = run_batch_task_gen(gen_task, questions)
-⋮----
-"""
-    Test removal of generated enrichments from documents both if
-    they have enrichment or not.
-    """
-⋮----
-original_content = "This is the original content"
-sample_docs = [
-⋮----
-enrichment_config = ChunkEnrichmentAgentConfig() if enrichment else None
-⋮----
-cleaned_docs = agent.remove_chunk_enrichments(sample_docs)
-⋮----
-# Document with questions should be cleaned
-⋮----
-# Normal document should be unchanged
-⋮----
-def test_add_enrichments() -> None
-⋮----
-"""Test generation of enrichments for documents"""
-⋮----
-enrichment_agent_config = ChunkEnrichmentAgentConfig(
-⋮----
-augmented_docs = agent.enrich_chunks(sample_docs)
-⋮----
-# Original content should be preserved before marker
-⋮----
-# Should have enrichment after marker
-enrichment_part = doc.content.split(CHUNK_ENRICHMENT_DELIMITER)[1].strip()
-⋮----
-def test_enrichments_disabled() -> None
-⋮----
-"""Test that enrichments are not generated when disabled"""
-⋮----
-sample_docs = [Document(content="Doc 1", metadata=DocMetaData(source="one"))]
-⋮----
-agent = DocChatAgent(_TestDocChatAgentConfig(chunk_enrichment_config=None))
-⋮----
-processed_docs = agent.enrich_chunks(sample_docs)
-⋮----
-def test_enrichments_integration(vecdb: VectorStore) -> None
-⋮----
-"""Integration test for chunk-enrichments in RAG pipeline"""
-⋮----
-# Blood Urea Nitrogen test for kidney function
-⋮----
-# B-type natriuretic peptide test for heart function
-⋮----
-# add 20 random docs
-⋮----
-# clear existing docs
-⋮----
-# Verify questions were generated during ingestion
-all_docs = agent.vecdb.get_all_documents()
-⋮----
-# retrieve docs they should not contain generated enrichments
-doc1 = agent.answer_from_docs("Which medical test is kidney-related?")
-doc2 = agent.answer_from_docs("Which blood test is related to heart-function?")
-⋮----
-# they are documents enriched with keywords
-# but the keywords should be removed on retrieval
-⋮----
-# check that the right content is in the docs
-⋮----
-@pytest.mark.parametrize("vecdb", ["chroma", "lancedb", "qdrant_local"], indirect=True)
-def test_doc_chat_agent_ingest(test_settings: Settings, vecdb)
-⋮----
-agent = DocChatAgent(_MyDocChatAgentConfig())
-⋮----
-agent.clear()  # clear the collection in the vector store
-⋮----
-# Base documents with simple metadata
-⋮----
-# Test case 1: List of metadata dicts
-docs_copy = [d.model_copy() for d in docs]
-meta_list = [
-⋮----
-stored = agent.vecdb.get_all_documents()
-⋮----
-# Test case 2: Single metadata dict for all docs
-⋮----
-meta_dict = {"category": "common", "source": "new"}
-⋮----
-# Test case 3: List of DocMetaData
-⋮----
-meta_docs = [
-⋮----
-# Test case 4: Single DocMetaData for all docs
-⋮----
-meta_doc = DocMetaData(category="shared", source="new")
-⋮----
-@pytest.mark.parametrize("vecdb", ["chroma", "lancedb", "qdrant_local"], indirect=True)
-def test_doc_chat_agent_ingest_paths(test_settings: Settings, vecdb)
-⋮----
-# Create temp files and byte contents
-⋮----
-# Create two temp files
-file_contents = ["Content of file 1", "Content of file 2"]
-temp_files = []
-⋮----
-# Create two byte contents
-byte_contents = [b"Bytes content 1", b"Bytes content 2"]
-⋮----
-paths = temp_files + byte_contents
-⋮----
-# ingest with no additional metadata so we can get the original source
-docs = agent.ingest_doc_paths(paths)
-orig_sources = [d.metadata.source for d in docs]
-⋮----
-# now ingest with additional metadata
-⋮----
-# Create sets of expected and actual metadata
-expected_categories = {"file", "bytes"}
-expected_sources = {
-⋮----
-actual_categories = {d.metadata.category for d in stored}
-actual_sources = {d.metadata.source for d in stored}
-⋮----
-# Test case 2: Single metadata dict
-meta_dict = {"category": "common", "source": "shared"}
-⋮----
-expected_sources = {_append_metadata_source(s, "shared") for s in orig_sources}
-⋮----
-meta_docs = [DocMetaData(category="X", source=f"src{i}") for i in range(len(paths))]
-⋮----
-# now ingest with metadata
-⋮----
-expected_categories = {"X"}
-⋮----
-# Test case 4: Single DocMetaData
-⋮----
-docs = agent.ingest_doc_paths(paths, metadata=meta_doc)
-⋮----
-expected_sources = {_append_metadata_source(s, "new") for s in orig_sources}
-⋮----
-# Cleanup temp files
-</file>
-
-<file path="tests/main/test_doc_chat_relevance.py">
-embed_cfg = OpenAIEmbeddingsConfig(
-⋮----
-class MyDocMetaData(DocMetaData)
-⋮----
-id: str
-⋮----
-class MyDoc(Document)
-⋮----
-content: str
-metadata: MyDocMetaData
-⋮----
-@pytest.fixture(scope="function")
-def vecdb(request) -> VectorStore
-⋮----
-qd_dir = ":memory:"
-qd_cfg = QdrantDBConfig(
-qd = QdrantDB(qd_cfg)
-⋮----
-cd_dir = ".chroma/" + embed_cfg.model_type
-⋮----
-cd_cfg = ChromaDBConfig(
-cd = ChromaDB(cd_cfg)
-⋮----
-ldb_dir = ".lancedb/data/" + embed_cfg.model_type
-⋮----
-ldb_cfg = LanceDBConfig(
-⋮----
-document_class=MyDoc,  # IMPORTANT, to ensure table has full schema!
-⋮----
-ldb = LanceDB(ldb_cfg)
-⋮----
-set_global(Settings(cache=True))  # allow cacheing
-⋮----
-# category=UserWarning,
-⋮----
-# setup config for retrieval test, with n_neighbor_chunks=2
-# and parser.n_neighbor_ids = 5
-class _MyDocChatAgentConfig(DocChatAgentConfig)
-⋮----
-cross_encoder_reranking_model: str = ""
-n_query_rephrases: int = 0
-n_neighbor_chunks: int = 2
-n_similar_chunks: int = 2
-n_relevant_chunks: int = 2
-debug: bool = False
-stream: bool = True  # allow streaming where needed
-conversation_mode: bool = True
-vecdb: VectorStoreConfig = QdrantDBConfig(
-⋮----
-llm: OpenAIGPTConfig = OpenAIGPTConfig(
-⋮----
-parsing: ParsingConfig = ParsingConfig(
-⋮----
-"""
-    Test window retrieval of relevant doc-chunks.
-    Check that we are retrieving 2 neighbors around each match.
-    """
-agent = DocChatAgent(
-⋮----
-phrases = SimpleNamespace(
-text = "\n\n".join(vars(phrases).values())
-⋮----
-results = agent.get_relevant_chunks("What are giraffes like?")
-⋮----
-# All phrases except the CATS phrase should be in the results
-# since they are all within 2 chunks of a giraffe phrase.
-# (The CAT phrase is 3 chunks away, so it should not be in the results.)
-all_but_cats = [p for p in vars(phrases).values() if "Cats" not in p]
-# check that each phrases occurs in exactly one result
-⋮----
-@pytest.mark.parametrize("vecdb", ["qdrant_local", "chroma", "lancedb"], indirect=True)
-def test_doc_chat_rerank_diversity(test_settings: Settings, vecdb)
-⋮----
-"""
-    Test that reranking by diversity works.
-    """
-⋮----
-cfg = _MyDocChatAgentConfig(
-⋮----
-agent = DocChatAgent(cfg)
-⋮----
-docs = [
-reranked = agent.rerank_with_diversity(docs)
-⋮----
-# assert that each phrase tall, vegetarian, strange, fast
-# occurs exactly once in top 4 phrases
-⋮----
-@pytest.mark.parametrize("vecdb", ["qdrant_local", "chroma", "lancedb"], indirect=True)
-def test_doc_chat_rerank_periphery(test_settings: Settings, vecdb)
-⋮----
-"""
-    Test that reranking to periphery works.
-    """
-⋮----
-reranked = agent.rerank_to_periphery(docs)
-numbers = [int(d.content) for d in reranked]
-</file>
-
 <file path="tests/main/test_docx_parser.py">
 @pytest.mark.parametrize("source", ["path", "bytes"])
 @pytest.mark.parametrize("docxlib", ["python-docx"])
@@ -44134,99 +43608,6 @@ subtree = RepoLoader.select(tree, includes=desired)
 ⋮----
 # select non-existent files
 subtree = RepoLoader.select(tree, includes=["non-existent-file"])
-</file>
-
-<file path="tests/main/test_retriever_agent.py">
-def gen_data(size: int) -> List[Dict[str, Any]]
-⋮----
-# Create a list of states
-states = ["CA", "TX"]
-⋮----
-# Generate random age between 18 and 100
-ages = np.random.choice([18, 80], size)
-⋮----
-# Generate random gender
-genders = np.random.choice(["male", "female"], size)
-⋮----
-# Generate random state
-states_col = np.random.choice(states, size)
-⋮----
-# Generate random income between 30000 and 150000
-incomes = np.random.choice([15_000, 100_000], size)
-⋮----
-data = [
-⋮----
-# add special record to test if it can be found
-⋮----
-class _TestRetrieverAgentConfig(DocChatAgentConfig)
-⋮----
-system_message: str = "You are a data scientist"
-user_message: str = """
-data: Optional[List[Dict[str, Any]]] = None
-retrieve_only: bool = True
-retrieval_granularity: int = -1  # extract whole content
-n_similar_chunks: int = 5
-n_relevant_chunks: int = 5
-vecdb: QdrantDBConfig = QdrantDBConfig(
-parsing: ParsingConfig = ParsingConfig()
-cross_encoder_reranking_model: str = ""  # turn off cross-encoder reranking
-⋮----
-class _TestRetrieverAgent(RetrieverAgent)
-⋮----
-def __init__(self, config: _TestRetrieverAgentConfig)
-⋮----
-def get_records(self) -> Sequence[Document]
-⋮----
-dicts = gen_data(100)
-cfg = _TestRetrieverAgentConfig(
-agent = _TestRetrieverAgent(cfg)
-⋮----
-response = agent.llm_response(message=query).content
-⋮----
-embed_cfg = OpenAIEmbeddingsConfig(
-⋮----
-class MyDocMetaData(DocMetaData)
-⋮----
-id: str
-⋮----
-class MyDoc(Document)
-⋮----
-content: str
-metadata: MyDocMetaData
-⋮----
-@pytest.fixture(scope="function")
-def vecdb(request) -> VectorStore
-⋮----
-qd_dir = ":memory:"
-qd_cfg = QdrantDBConfig(
-qd = QdrantDB(qd_cfg)
-⋮----
-cd_dir = ".chroma/" + embed_cfg.model_type
-⋮----
-cd_cfg = ChromaDBConfig(
-cd = ChromaDB(cd_cfg)
-⋮----
-ldb_dir = ".lancedb/data/" + embed_cfg.model_type
-⋮----
-ldb_cfg = LanceDBConfig(
-⋮----
-document_class=MyDoc,  # IMPORTANT, to ensure table has full schema!
-⋮----
-ldb = LanceDB(ldb_cfg)
-⋮----
-summaries = SimpleNamespace(
-⋮----
-data = {
-⋮----
-df = pd.DataFrame(data)
-⋮----
-"""Check we can ingest from a dataframe and run queries."""
-⋮----
-agent_cfg = _TestRetrieverAgentConfig()
-agent = RetrieverAgent(agent_cfg)
-⋮----
-response = agent.llm_response(
-# Check that the ENTIRE description is returned
 </file>
 
 <file path="tests/main/test_rich_file_logger.py">
@@ -48888,6 +48269,445 @@ class MyTableAgent(TableChatAgent):
 ```
 </file>
 
+<file path="docs/notes/mcp-tools.md">
+# Langroid MCP Integration
+
+Langroid provides seamless integration with Model Context Protocol (MCP) servers via 
+two methods, both of which involve creating Langroid `ToolMessage` subclasses
+corresponding to the MCP tools: 
+
+1. Programmatic creation of Langroid tools using `get_tool_async`, 
+   `get_tools_async` from the tool definitions defined on an MCP server.
+2. Declarative creation of Langroid tools using the **`@mcp_tool` decorator**, which allows
+   customizing the tool-handling behavior beyond what is provided by the MCP server.
+
+This integration allows _any_ LLM (that is good enough to do function-calling via prompts) to use any MCP server.
+See the following to understand the integration better:
+
+- example python scripts under [`examples/mcp`](https://github.com/langroid/langroid/tree/main/examples/mcp)
+- [`tests/main/test_mcp_tools.py`](https://github.com/langroid/langroid/blob/main/tests/main/test_mcp_tools.py)
+
+---
+
+## 1. Connecting to an MCP server via transport specification
+
+Before creating Langroid tools, we first need to define and connect to an MCP server
+via a [FastMCP](https://gofastmcp.com/getting-started/welcome) client. 
+There are several ways to connect to a server, depending on how it is defined. 
+Each of these uses a different type of [transport](https://gofastmcp.com/clients/transports).
+
+The typical pattern to use with Langroid is as follows:
+
+- define an MCP server transport
+- create a `ToolMessage` subclass using the `@mcp_tool` decorator or 
+  `get_tool_async()` function, with the transport as the first argument
+
+
+Langroid's MCP integration will work with any of [transports](https://gofastmcp.com/clients/transportsl) 
+supported by FastMCP.
+Below we go over some common ways to define transports and extract tools from the servers.
+
+1. **Local Python script**
+2. **In-memory FastMCP server** - useful for testing and for simple in-memory servers
+   that don't need to be run as a separate process.
+3. **NPX stdio transport**
+4. **UVX stdio transport**
+5. **Generic stdio transport** – launch any CLI‐based MCP server via stdin/stdout
+6. **Network SSE transport** – connect to HTTP/S MCP servers via `SSETransport`
+
+
+All examples below use the async helpers to create Langroid tools (`ToolMessage` subclasses):
+
+```python
+from langroid.agent.tools.mcp import (
+    get_tools_async,
+    get_tool_async,
+)
+```
+
+---
+
+#### Path to a Python Script
+
+Point at your MCP‐server entrypoint, e.g., to the `weather.py` script in the 
+langroid repo (based on the [Anthropic quick-start guide](https://modelcontextprotocol.io/quickstart/server)):
+
+```python
+async def example_script_path() -> None:
+    server = "tests/main/mcp/weather-server-python/weather.py"
+    tools = await get_tools_async(server) # all tools available
+    AlertTool = await get_tool_async(server, "get_alerts") # specific tool
+
+    # instantiate the tool with a specific input
+    msg = AlertTool(state="CA")
+    
+    # Call the tool via handle_async()
+    alerts = await msg.handle_async()
+    print(alerts)
+```
+
+---
+
+#### In-Memory FastMCP Server
+
+Define your server with `FastMCP(...)` and pass the instance:
+
+```python
+from fastmcp.server import FastMCP
+from pydantic import BaseModel, Field
+
+class CounterInput(BaseModel):
+    start: int = Field(...)
+
+def make_server() -> FastMCP:
+    server = FastMCP("CounterServer")
+
+    @server.tool()
+    def increment(data: CounterInput) -> int:
+        """Increment start by 1."""
+        return data.start + 1
+
+    return server
+
+async def example_in_memory() -> None:
+    server = make_server()
+    tools = await get_tools_async(server)
+    IncTool = await get_tool_async(server, "increment")
+
+    result = await IncTool(start=41).handle_async()
+    print(result)  # 42
+```
+
+See the [`mcp-file-system.py`](https://github.com/langroid/langroid/blob/main/examples/mcp/mcp-file-system.py)
+script for a working example of this.
+
+---
+
+#### NPX stdio Transport
+
+Use any npm-installed MCP server via `npx`, e.g., the 
+[Exa web-search MCP server](https://docs.exa.ai/examples/exa-mcp):
+
+```python
+from fastmcp.client.transports import NpxStdioTransport
+
+transport = NpxStdioTransport(
+    package="exa-mcp-server",
+    env_vars={"EXA_API_KEY": "…"},
+)
+
+async def example_npx() -> None:
+    tools = await get_tools_async(transport)
+    SearchTool = await get_tool_async(transport, "web_search_exa")
+
+    results = await SearchTool(
+        query="How does Langroid integrate with MCP?"
+    ).handle_async()
+    print(results)
+```
+
+For a fully working example, see the script [`exa-web-search.py`](https://github.com/langroid/langroid/blob/main/examples/mcp/exa-web-search.py).
+
+---
+
+#### UVX stdio Transport
+
+Connect to a UVX-based MCP server, e.g., the [Git MCP Server](https://github.com/modelcontextprotocol/servers/tree/main/src/git)
+
+```python
+from fastmcp.client.transports import UvxStdioTransport
+
+transport = UvxStdioTransport(tool_name="mcp-server-git")
+
+async def example_uvx() -> None:
+    tools = await get_tools_async(transport)
+    GitStatus = await get_tool_async(transport, "git_status")
+
+    status = await GitStatus(path=".").handle_async()
+    print(status)
+```
+
+--- 
+
+#### Generic stdio Transport
+
+Use `StdioTransport` to run any MCP server as a subprocess over stdio:
+
+```python
+from fastmcp.client.transports import StdioTransport
+from langroid.agent.tools.mcp import get_tools_async, get_tool_async
+
+
+async def example_stdio() -> None:
+    """Example: any CLI‐based MCP server via StdioTransport."""
+    transport: StdioTransport = StdioTransport(
+        command="uv",
+        args=["run", "--with", "biomcp-python", "biomcp", "run"],
+    )
+    tools: list[type] = await get_tools_async(transport)
+    BioTool = await get_tool_async(transport, "tool_name")
+    result: str = await BioTool(param="value").handle_async()
+    print(result)
+```
+
+See the full example in [`examples/mcp/biomcp.py`](https://github.com/langroid/langroid/blob/main/examples/mcp/biomcp.py).
+
+---
+
+#### Network SSE Transport
+
+Use `SSETransport` to connect to a FastMCP server over HTTP/S:
+
+```python
+from fastmcp.client.transports import SSETransport
+from langroid.agent.tools.mcp import (
+    get_tools_async,
+    get_tool_async,
+)
+
+
+async def example_sse() -> None:
+    """Example: connect to an HTTP/S MCP server via SSETransport."""
+    url: str = "https://localhost:8000/sse"
+    transport: SSETransport = SSETransport(
+        url=url, headers={"Authorization": "Bearer TOKEN"}
+    )
+    tools: list[type] = await get_tools_async(transport)
+    ExampleTool = await get_tool_async(transport, "tool_name")
+    result: str = await ExampleTool(param="value").handle_async()
+    print(result)
+```    
+
+---
+
+With these patterns you can list tools, generate Pydantic-backed `ToolMessage` classes,
+and invoke them via `.handle_async()`, all with zero boilerplate client setup. 
+As the `FastMCP` library adds other types of transport (e.g., `StreamableHTTPTransport`),
+the pattern of usage with Langroid will remain the same.
+
+
+---
+
+## Best Practice: Use a server factory for stdio transports
+
+Starting with fastmcp 2.13 and mcp 1.21, stdio transports (e.g., `StdioTransport`,
+`NpxStdioTransport`, `UvxStdioTransport`) are effectively single‑use. Reusing the
+same transport instance across multiple connections can lead to errors such as
+`anyio.ClosedResourceError` during session initialization.
+
+To make your code robust and future‑proof, pass a zero‑argument server factory to
+Langroid’s MCP helpers. A “server factory” is simply a `lambda` or function that
+returns a fresh server spec or transport each time.
+
+Benefits:
+
+- Fresh, reliable connections on every call (no reuse of closed transports).
+- Works across fastmcp/mcp versions without subtle lifecycle issues.
+- Enables concurrent calls safely (each call uses its own subprocess/session).
+- Keeps your decorator ergonomics and `handle_async` overrides unchanged.
+
+You can use a factory with both the decorator and the async helpers:
+
+```python
+from fastmcp.client.transports import StdioTransport
+from langroid.agent.tools.mcp import mcp_tool, get_tool_async
+
+# 1) Decorator style
+@mcp_tool(lambda: StdioTransport(command="claude", args=["mcp", "serve"], env={}),
+          "Grep")
+class GrepTool(lr.ToolMessage):
+    async def handle_async(self) -> str:
+        # pre/post-process around the raw MCP call
+        result = await self.call_tool_async()
+        return f"<GrepResult>\n{result}\n</GrepResult>"
+
+# 2) Programmatic style
+BaseGrep = await get_tool_async(
+    lambda: StdioTransport(command="claude", args=["mcp", "serve"], env={}),
+    "Grep",
+)
+```
+
+Notes:
+
+- Passing a concrete transport instance still works: Langroid will try to clone
+  it internally; however, a factory is the most reliable across environments.
+- For network transports (e.g., `SSETransport`), a factory is optional; you can
+  continue passing the transport instance directly.
+
+---
+
+## Output-schema validation: return structured content when required
+
+Newer `mcp` clients validate tool outputs against the tool’s output schema. If a
+tool declares a structured output, returning plain text may raise a runtime
+error. Some servers (for example, Claude Code’s Grep) expose an argument like
+`output_mode` that controls the shape of the response.
+
+Recommendations:
+
+- Prefer structured modes when a tool declares an output schema.
+- If available, set options like `output_mode="structured"` (or a documented
+  structured variant such as `"files_with_matches"`) in your tool’s
+  `handle_async` before calling `await self.call_tool_async()`.
+
+Example tweak in a decorator-based tool:
+
+```python
+@mcp_tool(lambda: StdioTransport(command="claude", args=["mcp", "serve"]),
+          "Grep")
+class GrepTool(lr.ToolMessage):
+    async def handle_async(self) -> str:
+        # Ensure a structured response if the server supports it
+        if hasattr(self, "output_mode"):
+            self.output_mode = "structured"
+        return await self.call_tool_async()
+```
+
+If the server does not provide such a switch, follow its documentation for
+returning data that matches its declared output schema.
+
+---
+
+## 2. Create Langroid Tools declaratively using the `@mcp_tool` decorator
+
+The above examples showed how you can create Langroid tools programmatically using
+the helper functions `get_tool_async()` and `get_tools_async()`,
+with the first argument being the transport to the MCP server. The `@mcp_tool` decorator
+works in the same way: 
+
+- **Arguments to the decorator**
+    1. `server_spec`: path/URL/`FastMCP`/`ClientTransport`, as mentioned above.
+    2. `tool_name`: name of a specific MCP tool
+
+- **Behavior**
+    - Generates a `ToolMessage` subclass with all input fields typed.
+    - Provides a `call_tool_async()` under the hood -- this is the "raw" MCP tool call,
+      returning a string.
+    - If you define your own `handle_async()`, it overrides the default. Typically,
+you would override it to customize either the input or the output of the tool call, or both.
+    - If you don't define your own `handle_async()`, it defaults to just returning the
+      value of the `call_tool_async()` method.
+
+Here is a simple example of using the `@mcp_tool` decorator to create a Langroid tool:
+
+```python
+from fastmcp.server import FastMCP
+from langroid.agent.tools.mcp import mcp_tool
+import langroid as lr
+
+# Define your MCP server (pydantic v2 for schema)
+server = FastMCP("MyServer")
+
+@mcp_tool(server, "greet")
+class GreetTool(lr.ToolMessage):
+    """Say hello to someone."""
+
+    async def handle_async(self) -> str:
+        # Customize post-processing
+        raw = await self.call_tool_async()
+        return f"💬 {raw}"
+```
+
+Using the decorator method allows you to customize the `handle_async` method of the
+tool, or add additional fields to the `ToolMessage`. 
+You may want to customize the input to the tool, or the tool result before it is sent back to 
+the LLM. If you don't override it, the default behavior is to simply return the value of 
+the "raw" MCP tool call `await self.call_tool_async()`. 
+
+```python
+@mcp_tool(server, "calculate")
+class CalcTool(ToolMessage):
+    """Perform complex calculation."""
+
+    async def handle_async(self) -> str:
+        result = await self.call_tool_async()
+        # Add context or emojis, etc.
+        return f"🧮 Result is *{result}*"
+```
+
+---
+
+## 3. Enabling Tools in Your Agent
+
+Once you’ve created a Langroid `ToolMessage` subclass from an MCP server, 
+you can enable it on a `ChatAgent`, just like you normally would. Below is an example of using 
+the [Exa MCP server](https://docs.exa.ai/examples/exa-mcp) to create a 
+Langroid web search tool, enable a `ChatAgent` to use it, and then set up a `Task` to 
+run the agent loop.
+
+First we must define the appropriate `ClientTransport` for the MCP server:
+```python
+# define the transport
+transport = NpxStdioTransport(
+    package="exa-mcp-server",
+    env_vars=dict(EXA_API_KEY=os.getenv("EXA_API_KEY")),
+)
+```
+
+Then we use the `@mcp_tool` decorator to create a `ToolMessage` 
+subclass representing the web search tool. Note that one reason to use the decorator
+to define our tool is so we can specify a custom `handle_async` method that
+controls what is sent to the LLM after the actual raw MCP tool-call
+(the `call_tool_async` method) is made.
+
+```python
+# the second arg specifically refers to the `web_search_exa` tool available
+# on the server defined by the `transport` variable.
+@mcp_tool(transport, "web_search_exa")
+class ExaSearchTool(lr.ToolMessage):
+    async def handle_async(self):
+        result: str = await self.call_tool_async()
+        return f"""
+        Below are the results of the web search:
+        
+        <WebSearchResult>
+        {result}
+        </WebSearchResult>
+        
+        Use these results to answer the user's original question.
+        """
+
+```
+
+If we did not want to override the `handle_async` method, we could simply have
+created the `ExaSearchTool` class programmatically via the `get_tool_async` 
+function as shown above, i.e.:
+
+```python
+from langroid.agent.tools.mcp import get_tool_async
+
+ExaSearchTool = await get_tool_async(transport, "web_search_exa")
+```
+
+We can now define our main function where we create our `ChatAgent`,
+attach the `ExaSearchTool` to it, define the `Task`, and run the task loop.
+
+```python
+async def main():
+    agent = lr.ChatAgent(
+        lr.ChatAgentConfig(
+            # forward to user when LLM doesn't use a tool
+            handle_llm_no_tool=NonToolAction.FORWARD_USER,
+            llm=lm.OpenAIGPTConfig(
+                max_output_tokens=1000,
+                # this defaults to True, but we set it to False so we can see output
+                async_stream_quiet=False,
+            ),
+        )
+    )
+
+    # enable the agent to use the web-search tool
+    agent.enable_message(ExaSearchTool)
+    # make task with interactive=False =>
+    # waits for user only when LLM doesn't use a tool
+    task = lr.Task(agent, interactive=False)
+    await task.run_async()
+```
+
+See [`exa-web-search.py`](https://github.com/langroid/langroid/blob/main/examples/mcp/exa-web-search.py) for a full working example of this.
+</file>
+
 <file path="docs/notes/message-routing.md">
 # Message Routing in Multi-Agent Systems
 
@@ -50695,33 +50515,87 @@ task = lr.Task(agent, interactive=False)
 user_message = "Can you help me with some questions?"
 </file>
 
-<file path="examples/mcp/claude-code-mcp.py">
+<file path="examples/mcp/claude-code-mcp-single.py">
 """
-Enable a Langroid agent to use all MCP Tools from 
+Enable a Langroid agent to use a SINGLE MCP Tool from 
 Claude Code's MCP server.
 
+Similar to claude-code-mcp.py but showing how to use a single tool, i.e.,
+Claude-Code's special Grep tool that is built on ripgrep.
 
 Run like this (omitting the `--model` argument will use the default gpt-5-mini):
 
-    uv run examples/mcp/claude-code-mcp.py --model gpt-5-mini
+    uv run examples/mcp/claude-code-mcp-single.py --model gpt-5-mini
 
 
 """
 ⋮----
-async def main(model: str = "")
-⋮----
 transport = StdioTransport(
-all_tools = await get_tools_async(transport)
+⋮----
+# Illustrating how we can:
+# - use the MCP tool decorator to create a Langroid ToolMessage subclass
+# - override the handle_async() method to customize the output, sent to the LLM
+⋮----
+@mcp_tool(transport, "Grep")
+class GrepTool(lr.ToolMessage)
+⋮----
+async def handle_async(self)
+⋮----
+# Force a predictable, structured response shape from Grep so the
+# handler can parse and decide deterministically.
+# "content" mode returns matching lines along with numLines/numMatches.
+⋮----
+# CODEX: Minimal, readable post‑processing — parse the structured JSON
+# and present plain text fields (no JSON) so the LLM can skim quickly.
+# The task will terminate on the LLM’s non‑tool reply due to
+# handle_llm_no_tool=Done.
+# Call the actual tool. Langroid returns a tuple (text, files). Unpack
+# the text payload for presentation.
+result = await self.call_tool_async()
+⋮----
+summary = None
+lines = None
+⋮----
+data = json.loads(result_text) if isinstance(result_text, str) else {}
+⋮----
+mode = data.get("mode", "?")
+num_files = data.get("numFiles")
+filenames = data.get("filenames") or []
+num_lines = data.get("numLines")
+num_matches = data.get("numMatches")
+applied_limit = data.get("appliedLimit")
+applied_offset = data.get("appliedOffset")
+content_block = data.get("content", "")
+⋮----
+parts = [
+summary = "\n".join(p for p in parts if p)
+lines = str(content_block or "").rstrip()
+⋮----
+# Fallback: show raw payload if parsing failed
+⋮----
+async def main(model: str = "")
 ⋮----
 agent = lr.ChatAgent(
 ⋮----
-# forward to user when LLM doesn't use a tool
+# when the LLM responds without a tool, finish with that content
+# (prevents waiting for user input in non-interactive mode)
 ⋮----
-# enable the agent to use all tools
+# this defaults to True, but we set it to False so we can see output
 ⋮----
-# make task with interactive=False =>
-# waits for user only when LLM doesn't use a tool
+# enable the agent to use the grep tool
+⋮----
 task = lr.Task(agent, interactive=False)
+user_prompt = """
+⋮----
+result = await task.run_async(user_prompt)
+⋮----
+def run_main(**kwargs) -> None
+⋮----
+"""Run the async main function with a proper event loop.
+
+        Args:
+            **kwargs: Keyword arguments to pass to the main function.
+        """
 </file>
 
 <file path="examples/mcp/xquik-twitter-search.py">
@@ -51181,6 +51055,479 @@ RealTool: Type[ToolMessage] = get_tool(server, tool_name)
 # copy user‐defined methods / attributes onto RealTool
 ⋮----
 # preserve the user’s original name if you like:
+</file>
+
+<file path="langroid/agent/tools/mcp/fastmcp_client.py">
+# Optional transports; import guarded for environments without uvx/npx
+⋮----
+except Exception:  # pragma: no cover - optional
+NpxStdioTransport = tuple()  # type: ignore
+UvxStdioTransport = tuple()  # type: ignore
+⋮----
+load_dotenv()  # load environment variables from .env
+⋮----
+# Concrete server/transport spec accepted by fastmcp.Client
+FastMCPServerConcrete: TypeAlias = str | FastMCP[Any] | ClientTransport | AnyUrl
+# Public spec we accept: concrete spec or a zero-arg factory returning a spec
+FastMCPServerSpec: TypeAlias = (
+⋮----
+class FastMCPClient
+⋮----
+"""A client for interacting with a FastMCP server.
+
+    Provides async context manager functionality to safely manage resources.
+    """
+⋮----
+logger = logging.getLogger(__name__)
+_cm: Optional[Client[ClientTransport]] = None
+client: Optional[Client[ClientTransport]] = None
+read_timeout_seconds: datetime.timedelta | None = None
+⋮----
+sampling_handler: SamplingHandler | None = None,  # type: ignore
+roots: RootsList | RootsHandler | None = None,  # type: ignore
+⋮----
+"""Initialize the FastMCPClient.
+
+        Args:
+            server: FastMCP server or path to such a server
+        """
+⋮----
+# Default a slightly larger read timeout for stdio transports on first
+# connects. Allows flaky subprocess servers a bit more time to boot.
+⋮----
+default_secs = int(os.getenv("LANGROID_MCP_READ_TIMEOUT", "15"))
+⋮----
+async def __aenter__(self) -> "FastMCPClient"
+⋮----
+"""Enter the async context manager and connect inner client.
+
+        Always obtain a fresh transport/spec via a factory, then connect.
+        If the session initialization fails due to a transient stdio issue
+        (e.g., ClosedResourceError / connection closed), retry once with a
+        new transport instance for better resilience across fastmcp/mcp
+        versions and server launch timing.
+        """
+# Always normalize to a server factory and create a fresh spec
+server_factory = self._as_server_factory(self.server)
+⋮----
+# Configurable retry/backoff for transient stdio startup races.
+max_retries = int(os.getenv("LANGROID_MCP_CONNECT_RETRIES", "6"))
+⋮----
+backoff_base = float(os.getenv("LANGROID_MCP_CONNECT_BACKOFF_BASE", "0.35"))
+⋮----
+backoff_base = 0.35
+⋮----
+last_err: Optional[BaseException] = None
+⋮----
+server_spec: FastMCPServerConcrete = server_factory()
+# create inner client context manager
+self._cm = Client(  # type: ignore[assignment]
+⋮----
+# actually enter it (opens the session)
+self.client = await self._cm.__aenter__()  # type: ignore
+⋮----
+# Common transient failures when a subprocess exits early or
+# closes during initialize. Retry once with a fresh transport.
+⋮----
+last_err = e
+# ensure we reset _cm/client before retry
+⋮----
+await self._cm.__aexit__(None, None, None)  # type: ignore
+⋮----
+# brief backoff to allow server process to finish booting
+⋮----
+# fastmcp wraps ClosedResourceError into RuntimeError
+# "Server session was closed unexpectedly". Treat as transient.
+emsg = str(e)
+⋮----
+await self._cm.__aexit__(None, None, None)  # type: ignore
+⋮----
+# otherwise re-raise
+⋮----
+# If we get here both attempts failed
+⋮----
+async def connect(self) -> None
+⋮----
+"""Open the underlying session."""
+⋮----
+async def close(self) -> None
+⋮----
+"""Close the underlying session."""
+⋮----
+"""Exit the async context manager and close inner client."""
+# exit and close the inner fastmcp.Client
+⋮----
+await self._cm.__aexit__(exc_type, exc_val, exc_tb)  # type: ignore
+⋮----
+def __del__(self) -> None
+⋮----
+"""Warn about unclosed persistent connections."""
+⋮----
+"""Convert a JSON Schema snippet into a (type, Field) tuple.
+
+        Args:
+            name: Name of the field.
+            schema: JSON Schema for this field.
+            prefix: Prefix to use for nested model names.
+            is_required: Whether this field is required (from JSON Schema "required").
+
+        Returns:
+            A tuple of (python_type, Field(...)) for create_model.
+        """
+t = schema.get("type")
+# Use schema default if present, otherwise:
+# ... for required fields, None for optional fields
+⋮----
+default = schema["default"]
+⋮----
+default = ... if is_required else None
+desc = schema.get("description")
+# Object → nested BaseModel
+⋮----
+sub_name = f"{prefix}_{name.capitalize()}"
+sub_fields: Dict[str, Tuple[type, Any]] = {}
+# Get required fields for this nested object
+nested_required = set(schema.get("required", []))
+⋮----
+submodel = create_model(  # type: ignore
+# Wrap in Optional if not required
+model_type = submodel if is_required else Optional[submodel]
+return model_type, Field(default=default, description=desc)  # type: ignore
+# Array → List of items
+⋮----
+array_type = List[item_type]  # type: ignore
+⋮----
+array_type = Optional[array_type]  # type: ignore
+return array_type, Field(default=default, description=desc)  # type: ignore
+# Primitive types
+⋮----
+str_type = str if is_required else Optional[str]
+⋮----
+int_type = int if is_required else Optional[int]
+⋮----
+float_type = float if is_required else Optional[float]
+⋮----
+bool_type = bool if is_required else Optional[bool]
+⋮----
+# Fallback or unions
+⋮----
+# Default fallback
+⋮----
+async def get_tool_async(self, tool_name: str) -> Type[ToolMessage]
+⋮----
+"""
+        Create a Langroid ToolMessage subclass from the MCP Tool
+        with the given `tool_name`.
+        """
+⋮----
+target = await self.get_mcp_tool_async(tool_name)
+⋮----
+props = target.inputSchema.get("properties", {})
+# Get the list of required fields from JSON Schema
+required_fields = set(target.inputSchema.get("required", []))
+fields: Dict[str, Tuple[type, Any]] = {}
+⋮----
+# Convert target.name to CamelCase and add Tool suffix
+parts = target.name.replace("-", "_").split("_")
+camel_case = "".join(part.capitalize() for part in parts)
+model_name = f"{camel_case}Tool"
+⋮----
+# IMPORTANT: Avoid clashes with reserved field names in Langroid ToolMessage!
+# First figure out which field names are reserved
+reserved = set(_BaseToolMessage.__annotations__.keys())
+⋮----
+renamed: Dict[str, str] = {}
+new_fields: Dict[str, Tuple[type, Any]] = {}
+⋮----
+new_name = fname + "__"
+⋮----
+# now replace fields with our renamed‐aware mapping
+fields = new_fields
+⋮----
+# create Langroid ToolMessage subclass, with expected fields.
+tool_model = cast(
+⋮----
+create_model(  # type: ignore[call-overload]
+⋮----
+# Store ALL client configuration needed to recreate a client
+client_config = {
+⋮----
+# Always store a SERVER FACTORY to ensure a fresh transport per call
+⋮----
+tool_model._client_config = client_config  # type: ignore [attr-defined]
+tool_model._renamed_fields = renamed  # type: ignore[attr-defined]
+⋮----
+# 2) define an arg-free call_tool_async()
+async def call_tool_async(itself: ToolMessage) -> Any
+⋮----
+# pack up the payload
+# Get exclude fields from model config with proper type checking
+exclude_fields = set()
+model_config = getattr(itself, "model_config", {})
+⋮----
+exclude_list = model_config["json_schema_extra"]["exclude"]
+⋮----
+exclude_fields = set(exclude_list)
+⋮----
+# Add standard excluded fields
+⋮----
+# Exclude None values - MCP servers don't expect None for optional params
+payload = itself.model_dump(exclude=exclude_fields, exclude_none=True)
+⋮----
+# restore any renamed fields
+for orig, new in itself.__class__._renamed_fields.items():  # type: ignore
+⋮----
+client_cfg = getattr(itself.__class__, "_client_config", None)  # type: ignore
+⋮----
+# Fallback or error - ideally _client_config should always exist
+⋮----
+# Connect the client if not yet connected and keep the connection open
+⋮----
+# open a fresh client, call the tool, then close
+async with FastMCPClient(**client_cfg) as client:  # type: ignore
+⋮----
+tool_model.call_tool_async = call_tool_async  # type: ignore
+⋮----
+# 3) define handle_async() method with optional agent parameter
+⋮----
+"""
+                Auto-generated handler for MCP tool. Returns ChatDocument with files
+                if files are present and agent is provided, otherwise returns text.
+
+                To override: define your own handle_async method with matching signature
+                if you need file handling, or simpler signature if you only need text.
+                """
+response = await self.call_tool_async()  # type: ignore[attr-defined]
+⋮----
+# If we have files and an agent is provided, return a ChatDocument
+⋮----
+# Otherwise, just return the text content
+⋮----
+# add the handle_async() method to the tool model
+tool_model.handle_async = handle_async  # type: ignore
+⋮----
+async def get_tools_async(self) -> List[Type[ToolMessage]]
+⋮----
+"""
+        Get all available tools as Langroid ToolMessage classes,
+        handling nested schemas, with `handle_async` methods
+        """
+⋮----
+resp = await self.client.list_tools()
+⋮----
+async def get_mcp_tool_async(self, name: str) -> Optional[Tool]
+⋮----
+"""Find the "original" MCP Tool (i.e. of type mcp.types.Tool) on the server
+         matching `name`, or None if missing. This contains the metadata for the tool:
+         name, description, inputSchema, etc.
+
+        Args:
+            name: Name of the tool to look up.
+
+        Returns:
+            The raw Tool object from the server, or None.
+        """
+⋮----
+resp: List[Tool] = await self.client.list_tools()
+⋮----
+"""Normalize a server spec to a zero-arg factory.
+
+        - If already callable, return as-is.
+        - If a ClientTransport instance, return a factory that yields the SAME
+          instance. This preserves state for keep-alive stdio transports (e.g.,
+          npx/uvx servers) so multi-call workflows can share process state.
+          Recreating a fresh transport each call would lose stateful servers
+          like `@modelcontextprotocol/server-memory` and break tests.
+        - Otherwise return a factory that yields the given spec.
+        """
+if callable(server):  # type: ignore[arg-type]
+return server  # type: ignore[return-value]
+⋮----
+# Reuse policy split:
+# - Npx/Uvx stdio transports: reuse the SAME instance to preserve
+#   keep-alive subprocess state (stateful MCP servers).
+# - Plain StdioTransport: CLONE a fresh transport to avoid reusing
+#   process/pipes across decorator-time schema fetch and runtime calls
+#   (some stdio servers close after first session, like CLI wrappers).
+⋮----
+) or (  # type: ignore[arg-type]
+⋮----
+):  # type: ignore[arg-type]
+⋮----
+# If optional classes are tuples (import failed), fall through
+⋮----
+# Best‑effort clone with back‑compat: only pass kwargs supported
+# by this installed fastmcp version's StdioTransport.__init__.
+sig = inspect.signature(StdioTransport.__init__)
+params = sig.parameters
+⋮----
+def _pick(name: str, default: Any = None) -> Any
+⋮----
+# Required in all known versions
+cmd = getattr(server, "command", None)
+args = list(getattr(server, "args", []) or [])
+⋮----
+# Optional, filter by signature presence
+env = _pick("env")
+cwd = _pick("cwd")
+keep_alive = _pick("keep_alive")
+log_file = _pick("log_file")
+⋮----
+def _factory() -> StdioTransport
+⋮----
+kwargs = {"command": cmd, "args": args}
+⋮----
+return StdioTransport(**kwargs)  # type: ignore[arg-type]
+⋮----
+# Default for other ClientTransport types: reuse
+⋮----
+return lambda: server  # type: ignore[return-value]
+⋮----
+# Log more detailed error information
+error_content = None
+⋮----
+error_content = [
+⋮----
+error_content = [f"Could not extract error content: {str(e)}"]
+⋮----
+# 1) Collect any plain TextContent first. This preserves legacy behavior
+# for simple servers that return only text. If we have text, prefer it
+# over structuredContent to avoid surprising downstream code.
+results_text: list[str] = [
+results_file: list[FileAttachment] = []
+⋮----
+# Also collect resources alongside text; callers may want them.
+⋮----
+# 2) No plain text — use structuredContent if available. To maintain
+# backwards compatibility, unwrap simple shapes like {"result": 5}
+# into "5"; otherwise serialize the full object as JSON for fidelity.
+⋮----
+sc = result.structuredContent
+⋮----
+# Unwrap primitives directly
+⋮----
+# Unwrap single-key primitive dicts commonly used by tools
+⋮----
+# Otherwise, serialize to JSON for rich/structured tools
+⋮----
+# 3) Nothing usable — return empty text and any files
+⋮----
+"""Call an MCP tool with the given arguments.
+
+        Args:
+            tool_name: Name of the tool to call.
+            arguments: Arguments to pass to the tool.
+
+        Returns:
+            The result of the tool call.
+        """
+⋮----
+# Prefer validated call; if server fails to provide structured content
+# despite declaring a schema, fall back to a raw request to bypass
+# client-side validation and still surface the data.
+⋮----
+result: CallToolResult = await self.client.session.call_tool(
+⋮----
+msg = str(e)
+⋮----
+result = await self.client.session.send_request(  # type: ignore[assignment]
+results = self._convert_tool_result(tool_name, result)
+⋮----
+# ==============================================================================
+# Convenience functions (wrappers around FastMCPClient methods)
+# These are useful for one-off calls without needing to manage the
+# FastMCPClient context explicitly.
+⋮----
+"""Get a single Langroid ToolMessage subclass for a specific MCP tool name (async).
+
+    This is a convenience wrapper that creates a temporary FastMCPClient.
+
+    Args:
+        server: Specification of the FastMCP server to connect to.
+        tool_name: The name of the tool to retrieve.
+        **client_kwargs: Additional keyword arguments to pass to the
+            FastMCPClient constructor (e.g., sampling_handler, roots).
+
+    Returns:
+        A dynamically created Langroid ToolMessage subclass representing the
+        requested tool.
+    """
+⋮----
+"""Get a single Langroid ToolMessage subclass
+    for a specific MCP tool name (synchronous).
+
+    This is a convenience wrapper that creates a temporary FastMCPClient and runs the
+    async `get_tool_async` function using `asyncio.run()`.
+
+    Args:
+        server: Specification of the FastMCP server to connect to.
+        tool_name: The name of the tool to retrieve.
+        **client_kwargs: Additional keyword arguments to pass to the
+            FastMCPClient constructor (e.g., sampling_handler, roots).
+
+    Returns:
+        A dynamically created Langroid ToolMessage subclass representing the
+        requested tool.
+    """
+⋮----
+"""Get all available tools as Langroid ToolMessage subclasses (async).
+
+    This is a convenience wrapper that creates a temporary FastMCPClient.
+
+    Args:
+        server: Specification of the FastMCP server to connect to.
+        **client_kwargs: Additional keyword arguments to pass to the
+            FastMCPClient constructor (e.g., sampling_handler, roots).
+
+    Returns:
+        A list of dynamically created Langroid ToolMessage subclasses
+        representing all available tools on the server.
+    """
+⋮----
+"""Get all available tools as Langroid ToolMessage subclasses (synchronous).
+
+    This is a convenience wrapper that creates a temporary FastMCPClient and runs the
+    async `get_tools_async` function using `asyncio.run()`.
+
+    Args:
+        server: Specification of the FastMCP server to connect to.
+        **client_kwargs: Additional keyword arguments to pass to the
+            FastMCPClient constructor (e.g., sampling_handler, roots).
+
+    Returns:
+        A list of dynamically created Langroid ToolMessage subclasses
+        representing all available tools on the server.
+    """
+⋮----
+"""Get the raw MCP Tool object for a specific tool name (async).
+
+    This is a convenience wrapper that creates a temporary FastMCPClient to
+    retrieve the tool definition from the server.
+
+    Args:
+        server: Specification of the FastMCP server to connect to.
+        name: The name of the tool to look up.
+        **client_kwargs: Additional keyword arguments to pass to the
+            FastMCPClient constructor.
+
+    Returns:
+        The raw `mcp.types.Tool` object from the server, or `None` if the tool
+        is not found.
+    """
+⋮----
+"""Get all available raw MCP Tool objects from the server (async).
+
+    This is a convenience wrapper that creates a temporary FastMCPClient to
+    retrieve the list of tool definitions from the server.
+
+    Args:
+        server: Specification of the FastMCP server to connect to.
+        **client_kwargs: Additional keyword arguments to pass to the
+            FastMCPClient constructor.
+
+    Returns:
+        A list of raw `mcp.types.Tool` objects available on the server.
+    """
 </file>
 
 <file path="langroid/agent/tools/file_tools.py">
@@ -56828,6 +57175,567 @@ _ = (content, tools_content, is_tool, cached, language)
 # Verify callback was actually called
 </file>
 
+<file path="tests/main/test_doc_chat_agent.py">
+embed_cfg = OpenAIEmbeddingsConfig(
+⋮----
+class MyDocMetaData(DocMetaData)
+⋮----
+id: str
+⋮----
+class MyDoc(Document)
+⋮----
+content: str
+metadata: MyDocMetaData
+⋮----
+documents: List[Document] = [
+⋮----
+QUERY_EXPECTED_PAIRS = [
+⋮----
+@pytest.fixture(scope="function")
+def vecdb(test_settings: Settings, request) -> VectorStore
+⋮----
+# Unique suffix per pytest-xdist worker so parallel workers don't collide
+# on the same Qdrant collection in the shared local container (PR #1030).
+worker = os.environ.get("PYTEST_XDIST_WORKER", "main")
+⋮----
+qd_dir = ":memory:"
+qd_cfg = QdrantDBConfig(
+qd = QdrantDB(qd_cfg)
+⋮----
+qd_dir = ".qdrant/cloud/test-" + embed_cfg.model_type
+qd_cfg_cloud = QdrantDBConfig(
+qd_cloud = QdrantDB(qd_cfg_cloud)
+⋮----
+cd_dir = ".chroma/" + embed_cfg.model_type
+⋮----
+cd_cfg = ChromaDBConfig(
+cd = ChromaDB(cd_cfg)
+⋮----
+ldb_dir = ".lancedb/data/" + embed_cfg.model_type
+⋮----
+ldb_cfg = LanceDBConfig(
+⋮----
+document_class=MyDoc,  # IMPORTANT, to ensure table has full schema!
+⋮----
+ldb = LanceDB(ldb_cfg)
+⋮----
+class _TestDocChatAgentConfig(DocChatAgentConfig)
+⋮----
+cross_encoder_reranking_model: str = ""
+n_query_rephrases: int = 0
+debug: bool = False
+stream: bool = True  # allow streaming where needed
+conversation_mode: bool = True
+vecdb: VectorStoreConfig | None = None
+llm: OpenAIGPTConfig = OpenAIGPTConfig(
+⋮----
+n_similar_chunks: int = 3
+n_relevant_chunks: int = 3
+parsing: ParsingConfig = ParsingConfig(
+⋮----
+prompts: PromptsConfig = PromptsConfig(
+⋮----
+config = _TestDocChatAgentConfig()
+set_global(Settings(cache=True))  # allow cacheing
+⋮----
+@pytest.fixture(scope="function")
+def agent(test_settings: Settings, vecdb) -> DocChatAgent
+⋮----
+agent = DocChatAgent(config)
+⋮----
+# category=UserWarning,
+⋮----
+@pytest.mark.parametrize("query, expected", QUERY_EXPECTED_PAIRS)
+def test_doc_chat_agent_llm(test_settings: Settings, agent, query: str, expected: str)
+⋮----
+"""
+    Test directly using `llm_response` method of DocChatAgent.
+    """
+⋮----
+# note that the (query, ans) pairs are accumulated into the
+# internal dialog history of the agent.
+⋮----
+result = agent.llm_response(query)
+ans = result.content
+refs = extract_markdown_references(ans)
+sources = extract_markdown_references(result.metadata.source)
+⋮----
+expected = [e.strip() for e in expected.split(",")]
+⋮----
+"""
+    Test directly using `llm_response_async` method of DocChatAgent.
+    """
+⋮----
+ans = (await agent.llm_response_async(query)).content
+⋮----
+@pytest.mark.parametrize("query, expected", QUERY_EXPECTED_PAIRS)
+@pytest.mark.parametrize("vecdb", ["qdrant_local", "chroma"], indirect=True)
+def test_doc_chat_agent_task(test_settings: Settings, agent, query, expected)
+⋮----
+"""
+    Test DocChatAgent wrapped in a Task.
+    """
+⋮----
+task = Task(agent, restart=True)
+⋮----
+# LLM responds to Sys msg, initiates conv, says thank you, etc.
+⋮----
+task.step()  # user asks query
+task.step()  # LLM answers
+ans = task.pending_message.content.lower()
+⋮----
+class RetrievalAgent(DocChatAgent)
+⋮----
+# override the DocChatAgent's LLM response,
+# to just use ChatAgent's LLM response - this ensures that the system msg
+# is respected, and it uses the `retrieval_tool` as instructed.
+⋮----
+@pytest.fixture(scope="function")
+def retrieval_agent(test_settings: Settings, vecdb) -> RetrievalAgent
+⋮----
+agent = RetrievalAgent(config)
+⋮----
+task = Task(
+# 3 turns:
+# 1. LLM gen `retrieval_tool` request
+# 2. Agent gen `retrieval_tool` response (i.e. returns relevant passages)
+# 3. LLM gen answer based on passages
+ans = task.run(query, turns=3).content
+expected = [e.strip().lower() for e in expected.split(",")]
+⋮----
+@pytest.fixture(scope="function")
+def new_agent(test_settings: Settings, vecdb) -> DocChatAgent
+⋮----
+"""
+    Test whether follow-up question is handled correctly.
+    """
+⋮----
+restart=False,  # don't restart, so we can ask follow-up questions
+⋮----
+result = task.run("Who was Charlie Foster?")
+⋮----
+result = task.run("When was he born?")
+⋮----
+# test retain_context when conv_mode is True
+⋮----
+question = "Who was Charlie Foster?"
+response = new_agent.llm_response(question)
+⋮----
+# context is retained, i.e.,
+# the user msg has both extracted chunks and the question itself
+⋮----
+# context is not retained, i.e., the user msg has only the question
+⋮----
+"""
+    Test whether follow-up question is handled correctly (in async mode).
+    """
+⋮----
+result = await task.run_async("Who was Charlie Foster?")
+⋮----
+result = await task.run_async("When was he born?")
+⋮----
+response = await new_agent.llm_response_async(question)
+⋮----
+# setup config for retrieval test, with n_neighbor_chunks=2
+# and parser.n_neighbor_ids = 5
+class _MyDocChatAgentConfig(DocChatAgentConfig)
+⋮----
+n_neighbor_chunks: int = 2
+⋮----
+n_similar_chunks: int = 2
+n_relevant_chunks: int = 2
+⋮----
+"""
+    Test window retrieval of relevant doc-chunks.
+    Check that we are retrieving 2 neighbors around each match.
+    """
+agent = DocChatAgent(
+⋮----
+phrases = SimpleNamespace(
+text = "\n\n".join(vars(phrases).values())
+⋮----
+results = agent.get_relevant_chunks("What are giraffes like?")
+⋮----
+# All phrases except the CATS phrase should be in the results
+# since they are all within 2 chunks of a giraffe phrase.
+# (The CAT phrase is 3 chunks away, so it should not be in the results.)
+all_but_cats = [p for p in vars(phrases).values() if "Cats" not in p]
+# check that each phrases occurs in exactly one result
+⋮----
+@pytest.mark.parametrize("vecdb", ["qdrant_local", "chroma"], indirect=True)
+def test_doc_chat_rerank_diversity(test_settings: Settings, vecdb)
+⋮----
+"""
+    Test that reranking by diversity works.
+    """
+⋮----
+cfg = _MyDocChatAgentConfig(
+⋮----
+agent = DocChatAgent(cfg)
+⋮----
+docs = [
+reranked = agent.rerank_with_diversity(docs)
+⋮----
+# assert that each phrase tall, vegetarian, strange, fast
+# occurs exactly once in top 4 phrases
+⋮----
+@pytest.mark.parametrize("vecdb", ["qdrant_local", "chroma"], indirect=True)
+def test_reciprocal_rank_fusion(test_settings: Settings, vecdb)
+⋮----
+"""
+    Test that RRF (Reciprocal Rank Fusion) works.
+    """
+⋮----
+n_similar_docs=None,  # Ensure we don't trigger backward compatibility
+⋮----
+chunks = agent.get_relevant_chunks("I like to chase banks")
+⋮----
+chunks = agent.get_relevant_chunks("I like oranges")
+⋮----
+@pytest.mark.parametrize("vecdb", ["qdrant_local", "chroma"], indirect=True)
+def test_doc_chat_rerank_periphery(test_settings: Settings, vecdb)
+⋮----
+"""
+    Test that reranking to periphery works.
+    """
+⋮----
+reranked = agent.rerank_to_periphery(docs)
+numbers = [int(d.content) for d in reranked]
+⋮----
+data = {
+⋮----
+df = pd.DataFrame(data)
+⋮----
+"""Check we can ingest from a dataframe and run queries."""
+⋮----
+sys_msg = "You will be asked to answer questions based on short book descriptions."
+agent_cfg = DocChatAgentConfig(
+⋮----
+agent = LanceDocChatAgent(agent_cfg)
+⋮----
+agent = DocChatAgent(agent_cfg)
+⋮----
+response = agent.llm_response(
+⋮----
+"""Check we can ingest from a dataframe,
+    with additional fields inserted into content,
+    and run queries that refer to those fields."""
+⋮----
+sys_msg = "You will be asked to answer questions based on short movie descriptions."
+⋮----
+"""
+    Check that we are able ingest documents incrementally.
+    """
+⋮----
+sentences = list(vars(phrases).values())
+docs1 = [
+⋮----
+docs2 = [
+⋮----
+results = agent.get_relevant_chunks("What do we know about Pigs?")
+⋮----
+results = agent.get_relevant_chunks("What do we know about Hyenas?")
+⋮----
+"""
+    Test DocChatAgent.ingest_doc_paths
+    """
+⋮----
+# create temp files containing each sentence, using tempfile pkg
+⋮----
+metadata_dict: bool,  # whether metadata is dict or DocMetaData
+⋮----
+"""
+    Test DocChatAgent.ingest_doc_paths, with metadata
+    """
+⋮----
+# create a list of dicts, each containing a sentence about an animal
+# and a metadata field indicating the animal's name, species, and diet
+animals = [
+⋮----
+class AnimalMetadata(DocMetaData)
+⋮----
+name: str
+species: str
+diet: str
+⋮----
+animal_metadata_list = [AnimalMetadata(**a["metadata"]) for a in animals]
+⋮----
+# put each animal content in a separate file
+⋮----
+# ingest with per-file metadata
+⋮----
+# assert about metadata
+⋮----
+# clear out the agent docs and the underlying vecdb collection
+⋮----
+# ingest with single metadata for ALL animals
+⋮----
+results = agent.get_relevant_chunks("What do we know about dogs?")
+⋮----
+@pytest.mark.parametrize("vecdb", ["chroma", "lancedb", "qdrant_local"], indirect=True)
+def test_doc_chat_batch(test_settings: Settings, vecdb)
+⋮----
+"""
+    Test batch run of queries to multiple instances of DocChatAgent,
+    which share the same vector-db.
+    """
+⋮----
+doc_agents = [DocChatAgent(_MyDocChatAgentConfig()) for _ in range(2)]
+⋮----
+# attach a common vector-db to all agents
+⋮----
+# note we only need to ingest docs using one of the agents,
+# since they share the same vector-db
+⋮----
+questions = [
+⋮----
+# (1) test that we can create a single task and use run_batch_tasks
+task = Task(doc_agents[0], name="DocAgent", interactive=False, single_round=True)
+results = run_batch_tasks(task, questions)
+⋮----
+# (2) test that we can create a task-generator fn and use run_batch_task_gen
+⋮----
+# create a task-generator fn, to create one per question
+def gen_task(i: int)
+⋮----
+results = run_batch_task_gen(gen_task, questions)
+⋮----
+"""
+    Test removal of generated enrichments from documents both if
+    they have enrichment or not.
+    """
+⋮----
+original_content = "This is the original content"
+sample_docs = [
+⋮----
+enrichment_config = ChunkEnrichmentAgentConfig() if enrichment else None
+⋮----
+cleaned_docs = agent.remove_chunk_enrichments(sample_docs)
+⋮----
+# Document with questions should be cleaned
+⋮----
+# Normal document should be unchanged
+⋮----
+def test_add_enrichments() -> None
+⋮----
+"""Test generation of enrichments for documents"""
+⋮----
+enrichment_agent_config = ChunkEnrichmentAgentConfig(
+⋮----
+augmented_docs = agent.enrich_chunks(sample_docs)
+⋮----
+# Original content should be preserved before marker
+⋮----
+# Should have enrichment after marker
+enrichment_part = doc.content.split(CHUNK_ENRICHMENT_DELIMITER)[1].strip()
+⋮----
+def test_enrichments_disabled() -> None
+⋮----
+"""Test that enrichments are not generated when disabled"""
+⋮----
+sample_docs = [Document(content="Doc 1", metadata=DocMetaData(source="one"))]
+⋮----
+agent = DocChatAgent(_TestDocChatAgentConfig(chunk_enrichment_config=None))
+⋮----
+processed_docs = agent.enrich_chunks(sample_docs)
+⋮----
+def test_enrichments_integration(vecdb: VectorStore) -> None
+⋮----
+"""Integration test for chunk-enrichments in RAG pipeline"""
+⋮----
+# Blood Urea Nitrogen test for kidney function
+⋮----
+# B-type natriuretic peptide test for heart function
+⋮----
+# add 20 random docs
+⋮----
+# clear existing docs
+⋮----
+# Verify questions were generated during ingestion
+all_docs = agent.vecdb.get_all_documents()
+⋮----
+# retrieve docs they should not contain generated enrichments
+doc1 = agent.answer_from_docs("Which medical test is kidney-related?")
+doc2 = agent.answer_from_docs("Which blood test is related to heart-function?")
+⋮----
+# they are documents enriched with keywords
+# but the keywords should be removed on retrieval
+⋮----
+# check that the right content is in the docs
+⋮----
+@pytest.mark.parametrize("vecdb", ["chroma", "lancedb", "qdrant_local"], indirect=True)
+def test_doc_chat_agent_ingest(test_settings: Settings, vecdb)
+⋮----
+agent = DocChatAgent(_MyDocChatAgentConfig())
+⋮----
+agent.clear()  # clear the collection in the vector store
+⋮----
+# Base documents with simple metadata
+⋮----
+# Test case 1: List of metadata dicts
+docs_copy = [d.model_copy() for d in docs]
+meta_list = [
+⋮----
+stored = agent.vecdb.get_all_documents()
+⋮----
+# Test case 2: Single metadata dict for all docs
+⋮----
+meta_dict = {"category": "common", "source": "new"}
+⋮----
+# Test case 3: List of DocMetaData
+⋮----
+meta_docs = [
+⋮----
+# Test case 4: Single DocMetaData for all docs
+⋮----
+meta_doc = DocMetaData(category="shared", source="new")
+⋮----
+@pytest.mark.parametrize("vecdb", ["chroma", "lancedb", "qdrant_local"], indirect=True)
+def test_doc_chat_agent_ingest_paths(test_settings: Settings, vecdb)
+⋮----
+# Create temp files and byte contents
+⋮----
+# Create two temp files
+file_contents = ["Content of file 1", "Content of file 2"]
+temp_files = []
+⋮----
+# Create two byte contents
+byte_contents = [b"Bytes content 1", b"Bytes content 2"]
+⋮----
+paths = temp_files + byte_contents
+⋮----
+# ingest with no additional metadata so we can get the original source
+docs = agent.ingest_doc_paths(paths)
+orig_sources = [d.metadata.source for d in docs]
+⋮----
+# now ingest with additional metadata
+⋮----
+# Create sets of expected and actual metadata
+expected_categories = {"file", "bytes"}
+expected_sources = {
+⋮----
+actual_categories = {d.metadata.category for d in stored}
+actual_sources = {d.metadata.source for d in stored}
+⋮----
+# Test case 2: Single metadata dict
+meta_dict = {"category": "common", "source": "shared"}
+⋮----
+expected_sources = {_append_metadata_source(s, "shared") for s in orig_sources}
+⋮----
+meta_docs = [DocMetaData(category="X", source=f"src{i}") for i in range(len(paths))]
+⋮----
+# now ingest with metadata
+⋮----
+expected_categories = {"X"}
+⋮----
+# Test case 4: Single DocMetaData
+⋮----
+docs = agent.ingest_doc_paths(paths, metadata=meta_doc)
+⋮----
+expected_sources = {_append_metadata_source(s, "new") for s in orig_sources}
+⋮----
+# Cleanup temp files
+</file>
+
+<file path="tests/main/test_doc_chat_relevance.py">
+embed_cfg = OpenAIEmbeddingsConfig(
+⋮----
+class MyDocMetaData(DocMetaData)
+⋮----
+id: str
+⋮----
+class MyDoc(Document)
+⋮----
+content: str
+metadata: MyDocMetaData
+⋮----
+@pytest.fixture(scope="function")
+def vecdb(request) -> VectorStore
+⋮----
+qd_dir = ":memory:"
+qd_cfg = QdrantDBConfig(
+qd = QdrantDB(qd_cfg)
+⋮----
+cd_dir = ".chroma/" + embed_cfg.model_type
+⋮----
+cd_cfg = ChromaDBConfig(
+cd = ChromaDB(cd_cfg)
+⋮----
+ldb_dir = ".lancedb/data/" + embed_cfg.model_type
+⋮----
+ldb_cfg = LanceDBConfig(
+⋮----
+document_class=MyDoc,  # IMPORTANT, to ensure table has full schema!
+⋮----
+ldb = LanceDB(ldb_cfg)
+⋮----
+set_global(Settings(cache=True))  # allow cacheing
+⋮----
+# category=UserWarning,
+⋮----
+# setup config for retrieval test, with n_neighbor_chunks=2
+# and parser.n_neighbor_ids = 5
+class _MyDocChatAgentConfig(DocChatAgentConfig)
+⋮----
+cross_encoder_reranking_model: str = ""
+n_query_rephrases: int = 0
+n_neighbor_chunks: int = 2
+n_similar_chunks: int = 2
+n_relevant_chunks: int = 2
+debug: bool = False
+stream: bool = True  # allow streaming where needed
+conversation_mode: bool = True
+vecdb: VectorStoreConfig = QdrantDBConfig(
+⋮----
+llm: OpenAIGPTConfig = OpenAIGPTConfig(
+⋮----
+parsing: ParsingConfig = ParsingConfig(
+⋮----
+"""
+    Test window retrieval of relevant doc-chunks.
+    Check that we are retrieving 2 neighbors around each match.
+    """
+agent = DocChatAgent(
+⋮----
+phrases = SimpleNamespace(
+text = "\n\n".join(vars(phrases).values())
+⋮----
+results = agent.get_relevant_chunks("What are giraffes like?")
+⋮----
+# All phrases except the CATS phrase should be in the results
+# since they are all within 2 chunks of a giraffe phrase.
+# (The CAT phrase is 3 chunks away, so it should not be in the results.)
+all_but_cats = [p for p in vars(phrases).values() if "Cats" not in p]
+# check that each phrases occurs in exactly one result
+⋮----
+@pytest.mark.parametrize("vecdb", ["qdrant_local", "chroma", "lancedb"], indirect=True)
+def test_doc_chat_rerank_diversity(test_settings: Settings, vecdb)
+⋮----
+"""
+    Test that reranking by diversity works.
+    """
+⋮----
+cfg = _MyDocChatAgentConfig(
+⋮----
+agent = DocChatAgent(cfg)
+⋮----
+docs = [
+reranked = agent.rerank_with_diversity(docs)
+⋮----
+# assert that each phrase tall, vegetarian, strange, fast
+# occurs exactly once in top 4 phrases
+⋮----
+@pytest.mark.parametrize("vecdb", ["qdrant_local", "chroma", "lancedb"], indirect=True)
+def test_doc_chat_rerank_periphery(test_settings: Settings, vecdb)
+⋮----
+"""
+    Test that reranking to periphery works.
+    """
+⋮----
+reranked = agent.rerank_to_periphery(docs)
+numbers = [int(d.content) for d in reranked]
+</file>
+
 <file path="tests/main/test_done_sequences_dsl.py">
 """Tests for done sequences DSL integration with Task."""
 ⋮----
@@ -58048,6 +58956,172 @@ pdf_parser = DocumentParser.create(bytes.getvalue(), cfg)
 citation = path if source == "url" else "bytes"
 </file>
 
+<file path="tests/main/test_qdrant_lock_release.py">
+"""
+Tests for QdrantDB lock release functionality.
+This tests the fix for the file lock conflict issue when using QdrantDB with 
+local storage.
+"""
+⋮----
+def test_qdrant_explicit_close()
+⋮----
+"""Test that explicitly calling close() releases the lock file."""
+⋮----
+config = QdrantDBConfig(
+⋮----
+# Create first instance
+db1 = QdrantDB(config)
+⋮----
+# Verify lock file exists
+lock_file = Path(temp_dir) / ".lock"
+⋮----
+# Close the instance
+⋮----
+# Now we should be able to create another instance without error
+db2 = QdrantDB(config)
+⋮----
+# Verify we're not using a .new directory
+⋮----
+def test_qdrant_context_manager()
+⋮----
+"""Test that using context manager properly releases the lock file."""
+⋮----
+# Use context manager for first instance
+⋮----
+# After exiting context, we should be able to create another instance
+⋮----
+# Verify we're not using a .new directory
+⋮----
+def test_qdrant_context_manager_with_exception()
+⋮----
+"""Test that context manager releases lock even when exception occurs."""
+⋮----
+# Use context manager with exception
+⋮----
+# Simulate some operation
+⋮----
+# Force an exception
+⋮----
+pass  # Expected
+⋮----
+# Lock should still be released after exception
+⋮----
+def test_qdrant_multiple_sequential_operations()
+⋮----
+"""Test multiple sequential create/close operations."""
+⋮----
+# Multiple sequential operations
+⋮----
+db = QdrantDB(config)
+⋮----
+# Verify no .new directories are created
+⋮----
+def test_qdrant_no_close_creates_new_directory()
+⋮----
+"""Test that not closing properly falls back to creating .new directory."""
+⋮----
+# Create first instance without closing
+⋮----
+# Try to create second instance - should fall back to .new
+⋮----
+# Verify .new directory was created due to lock conflict
+⋮----
+# Clean up
+</file>
+
+<file path="tests/main/test_retriever_agent.py">
+def gen_data(size: int) -> List[Dict[str, Any]]
+⋮----
+# Create a list of states
+states = ["CA", "TX"]
+⋮----
+# Generate random age between 18 and 100
+ages = np.random.choice([18, 80], size)
+⋮----
+# Generate random gender
+genders = np.random.choice(["male", "female"], size)
+⋮----
+# Generate random state
+states_col = np.random.choice(states, size)
+⋮----
+# Generate random income between 30000 and 150000
+incomes = np.random.choice([15_000, 100_000], size)
+⋮----
+data = [
+⋮----
+# add special record to test if it can be found
+⋮----
+class _TestRetrieverAgentConfig(DocChatAgentConfig)
+⋮----
+system_message: str = "You are a data scientist"
+user_message: str = """
+data: Optional[List[Dict[str, Any]]] = None
+retrieve_only: bool = True
+retrieval_granularity: int = -1  # extract whole content
+n_similar_chunks: int = 5
+n_relevant_chunks: int = 5
+vecdb: QdrantDBConfig = QdrantDBConfig(
+parsing: ParsingConfig = ParsingConfig()
+cross_encoder_reranking_model: str = ""  # turn off cross-encoder reranking
+⋮----
+class _TestRetrieverAgent(RetrieverAgent)
+⋮----
+def __init__(self, config: _TestRetrieverAgentConfig)
+⋮----
+def get_records(self) -> Sequence[Document]
+⋮----
+dicts = gen_data(100)
+cfg = _TestRetrieverAgentConfig(
+agent = _TestRetrieverAgent(cfg)
+⋮----
+response = agent.llm_response(message=query).content
+⋮----
+embed_cfg = OpenAIEmbeddingsConfig(
+⋮----
+class MyDocMetaData(DocMetaData)
+⋮----
+id: str
+⋮----
+class MyDoc(Document)
+⋮----
+content: str
+metadata: MyDocMetaData
+⋮----
+@pytest.fixture(scope="function")
+def vecdb(request) -> VectorStore
+⋮----
+qd_dir = ":memory:"
+qd_cfg = QdrantDBConfig(
+qd = QdrantDB(qd_cfg)
+⋮----
+cd_dir = ".chroma/" + embed_cfg.model_type
+⋮----
+cd_cfg = ChromaDBConfig(
+cd = ChromaDB(cd_cfg)
+⋮----
+ldb_dir = ".lancedb/data/" + embed_cfg.model_type
+⋮----
+ldb_cfg = LanceDBConfig(
+⋮----
+document_class=MyDoc,  # IMPORTANT, to ensure table has full schema!
+⋮----
+ldb = LanceDB(ldb_cfg)
+⋮----
+summaries = SimpleNamespace(
+⋮----
+data = {
+⋮----
+df = pd.DataFrame(data)
+⋮----
+"""Check we can ingest from a dataframe and run queries."""
+⋮----
+agent_cfg = _TestRetrieverAgentConfig()
+agent = RetrieverAgent(agent_cfg)
+⋮----
+response = agent.llm_response(
+# Check that the ENTIRE description is returned
+</file>
+
 <file path="tests/main/test_seltz_search.py">
 """
 Tests for Seltz search integration.
@@ -58804,445 +59878,6 @@ handlers.
 `openai.APIError` to avoid suppressing tracebacks for connection/timeout errors.
 </file>
 
-<file path="docs/notes/mcp-tools.md">
-# Langroid MCP Integration
-
-Langroid provides seamless integration with Model Context Protocol (MCP) servers via 
-two methods, both of which involve creating Langroid `ToolMessage` subclasses
-corresponding to the MCP tools: 
-
-1. Programmatic creation of Langroid tools using `get_tool_async`, 
-   `get_tools_async` from the tool definitions defined on an MCP server.
-2. Declarative creation of Langroid tools using the **`@mcp_tool` decorator**, which allows
-   customizing the tool-handling behavior beyond what is provided by the MCP server.
-
-This integration allows _any_ LLM (that is good enough to do function-calling via prompts) to use any MCP server.
-See the following to understand the integration better:
-
-- example python scripts under [`examples/mcp`](https://github.com/langroid/langroid/tree/main/examples/mcp)
-- [`tests/main/test_mcp_tools.py`](https://github.com/langroid/langroid/blob/main/tests/main/test_mcp_tools.py)
-
----
-
-## 1. Connecting to an MCP server via transport specification
-
-Before creating Langroid tools, we first need to define and connect to an MCP server
-via a [FastMCP](https://gofastmcp.com/getting-started/welcome) client. 
-There are several ways to connect to a server, depending on how it is defined. 
-Each of these uses a different type of [transport](https://gofastmcp.com/clients/transports).
-
-The typical pattern to use with Langroid is as follows:
-
-- define an MCP server transport
-- create a `ToolMessage` subclass using the `@mcp_tool` decorator or 
-  `get_tool_async()` function, with the transport as the first argument
-
-
-Langroid's MCP integration will work with any of [transports](https://gofastmcp.com/clients/transportsl) 
-supported by FastMCP.
-Below we go over some common ways to define transports and extract tools from the servers.
-
-1. **Local Python script**
-2. **In-memory FastMCP server** - useful for testing and for simple in-memory servers
-   that don't need to be run as a separate process.
-3. **NPX stdio transport**
-4. **UVX stdio transport**
-5. **Generic stdio transport** – launch any CLI‐based MCP server via stdin/stdout
-6. **Network SSE transport** – connect to HTTP/S MCP servers via `SSETransport`
-
-
-All examples below use the async helpers to create Langroid tools (`ToolMessage` subclasses):
-
-```python
-from langroid.agent.tools.mcp import (
-    get_tools_async,
-    get_tool_async,
-)
-```
-
----
-
-#### Path to a Python Script
-
-Point at your MCP‐server entrypoint, e.g., to the `weather.py` script in the 
-langroid repo (based on the [Anthropic quick-start guide](https://modelcontextprotocol.io/quickstart/server)):
-
-```python
-async def example_script_path() -> None:
-    server = "tests/main/mcp/weather-server-python/weather.py"
-    tools = await get_tools_async(server) # all tools available
-    AlertTool = await get_tool_async(server, "get_alerts") # specific tool
-
-    # instantiate the tool with a specific input
-    msg = AlertTool(state="CA")
-    
-    # Call the tool via handle_async()
-    alerts = await msg.handle_async()
-    print(alerts)
-```
-
----
-
-#### In-Memory FastMCP Server
-
-Define your server with `FastMCP(...)` and pass the instance:
-
-```python
-from fastmcp.server import FastMCP
-from pydantic import BaseModel, Field
-
-class CounterInput(BaseModel):
-    start: int = Field(...)
-
-def make_server() -> FastMCP:
-    server = FastMCP("CounterServer")
-
-    @server.tool()
-    def increment(data: CounterInput) -> int:
-        """Increment start by 1."""
-        return data.start + 1
-
-    return server
-
-async def example_in_memory() -> None:
-    server = make_server()
-    tools = await get_tools_async(server)
-    IncTool = await get_tool_async(server, "increment")
-
-    result = await IncTool(start=41).handle_async()
-    print(result)  # 42
-```
-
-See the [`mcp-file-system.py`](https://github.com/langroid/langroid/blob/main/examples/mcp/mcp-file-system.py)
-script for a working example of this.
-
----
-
-#### NPX stdio Transport
-
-Use any npm-installed MCP server via `npx`, e.g., the 
-[Exa web-search MCP server](https://docs.exa.ai/examples/exa-mcp):
-
-```python
-from fastmcp.client.transports import NpxStdioTransport
-
-transport = NpxStdioTransport(
-    package="exa-mcp-server",
-    env_vars={"EXA_API_KEY": "…"},
-)
-
-async def example_npx() -> None:
-    tools = await get_tools_async(transport)
-    SearchTool = await get_tool_async(transport, "web_search_exa")
-
-    results = await SearchTool(
-        query="How does Langroid integrate with MCP?"
-    ).handle_async()
-    print(results)
-```
-
-For a fully working example, see the script [`exa-web-search.py`](https://github.com/langroid/langroid/blob/main/examples/mcp/exa-web-search.py).
-
----
-
-#### UVX stdio Transport
-
-Connect to a UVX-based MCP server, e.g., the [Git MCP Server](https://github.com/modelcontextprotocol/servers/tree/main/src/git)
-
-```python
-from fastmcp.client.transports import UvxStdioTransport
-
-transport = UvxStdioTransport(tool_name="mcp-server-git")
-
-async def example_uvx() -> None:
-    tools = await get_tools_async(transport)
-    GitStatus = await get_tool_async(transport, "git_status")
-
-    status = await GitStatus(path=".").handle_async()
-    print(status)
-```
-
---- 
-
-#### Generic stdio Transport
-
-Use `StdioTransport` to run any MCP server as a subprocess over stdio:
-
-```python
-from fastmcp.client.transports import StdioTransport
-from langroid.agent.tools.mcp import get_tools_async, get_tool_async
-
-
-async def example_stdio() -> None:
-    """Example: any CLI‐based MCP server via StdioTransport."""
-    transport: StdioTransport = StdioTransport(
-        command="uv",
-        args=["run", "--with", "biomcp-python", "biomcp", "run"],
-    )
-    tools: list[type] = await get_tools_async(transport)
-    BioTool = await get_tool_async(transport, "tool_name")
-    result: str = await BioTool(param="value").handle_async()
-    print(result)
-```
-
-See the full example in [`examples/mcp/biomcp.py`](https://github.com/langroid/langroid/blob/main/examples/mcp/biomcp.py).
-
----
-
-#### Network SSE Transport
-
-Use `SSETransport` to connect to a FastMCP server over HTTP/S:
-
-```python
-from fastmcp.client.transports import SSETransport
-from langroid.agent.tools.mcp import (
-    get_tools_async,
-    get_tool_async,
-)
-
-
-async def example_sse() -> None:
-    """Example: connect to an HTTP/S MCP server via SSETransport."""
-    url: str = "https://localhost:8000/sse"
-    transport: SSETransport = SSETransport(
-        url=url, headers={"Authorization": "Bearer TOKEN"}
-    )
-    tools: list[type] = await get_tools_async(transport)
-    ExampleTool = await get_tool_async(transport, "tool_name")
-    result: str = await ExampleTool(param="value").handle_async()
-    print(result)
-```    
-
----
-
-With these patterns you can list tools, generate Pydantic-backed `ToolMessage` classes,
-and invoke them via `.handle_async()`, all with zero boilerplate client setup. 
-As the `FastMCP` library adds other types of transport (e.g., `StreamableHTTPTransport`),
-the pattern of usage with Langroid will remain the same.
-
-
----
-
-## Best Practice: Use a server factory for stdio transports
-
-Starting with fastmcp 2.13 and mcp 1.21, stdio transports (e.g., `StdioTransport`,
-`NpxStdioTransport`, `UvxStdioTransport`) are effectively single‑use. Reusing the
-same transport instance across multiple connections can lead to errors such as
-`anyio.ClosedResourceError` during session initialization.
-
-To make your code robust and future‑proof, pass a zero‑argument server factory to
-Langroid’s MCP helpers. A “server factory” is simply a `lambda` or function that
-returns a fresh server spec or transport each time.
-
-Benefits:
-
-- Fresh, reliable connections on every call (no reuse of closed transports).
-- Works across fastmcp/mcp versions without subtle lifecycle issues.
-- Enables concurrent calls safely (each call uses its own subprocess/session).
-- Keeps your decorator ergonomics and `handle_async` overrides unchanged.
-
-You can use a factory with both the decorator and the async helpers:
-
-```python
-from fastmcp.client.transports import StdioTransport
-from langroid.agent.tools.mcp import mcp_tool, get_tool_async
-
-# 1) Decorator style
-@mcp_tool(lambda: StdioTransport(command="claude", args=["mcp", "serve"], env={}),
-          "Grep")
-class GrepTool(lr.ToolMessage):
-    async def handle_async(self) -> str:
-        # pre/post-process around the raw MCP call
-        result = await self.call_tool_async()
-        return f"<GrepResult>\n{result}\n</GrepResult>"
-
-# 2) Programmatic style
-BaseGrep = await get_tool_async(
-    lambda: StdioTransport(command="claude", args=["mcp", "serve"], env={}),
-    "Grep",
-)
-```
-
-Notes:
-
-- Passing a concrete transport instance still works: Langroid will try to clone
-  it internally; however, a factory is the most reliable across environments.
-- For network transports (e.g., `SSETransport`), a factory is optional; you can
-  continue passing the transport instance directly.
-
----
-
-## Output-schema validation: return structured content when required
-
-Newer `mcp` clients validate tool outputs against the tool’s output schema. If a
-tool declares a structured output, returning plain text may raise a runtime
-error. Some servers (for example, Claude Code’s Grep) expose an argument like
-`output_mode` that controls the shape of the response.
-
-Recommendations:
-
-- Prefer structured modes when a tool declares an output schema.
-- If available, set options like `output_mode="structured"` (or a documented
-  structured variant such as `"files_with_matches"`) in your tool’s
-  `handle_async` before calling `await self.call_tool_async()`.
-
-Example tweak in a decorator-based tool:
-
-```python
-@mcp_tool(lambda: StdioTransport(command="claude", args=["mcp", "serve"]),
-          "Grep")
-class GrepTool(lr.ToolMessage):
-    async def handle_async(self) -> str:
-        # Ensure a structured response if the server supports it
-        if hasattr(self, "output_mode"):
-            self.output_mode = "structured"
-        return await self.call_tool_async()
-```
-
-If the server does not provide such a switch, follow its documentation for
-returning data that matches its declared output schema.
-
----
-
-## 2. Create Langroid Tools declaratively using the `@mcp_tool` decorator
-
-The above examples showed how you can create Langroid tools programmatically using
-the helper functions `get_tool_async()` and `get_tools_async()`,
-with the first argument being the transport to the MCP server. The `@mcp_tool` decorator
-works in the same way: 
-
-- **Arguments to the decorator**
-    1. `server_spec`: path/URL/`FastMCP`/`ClientTransport`, as mentioned above.
-    2. `tool_name`: name of a specific MCP tool
-
-- **Behavior**
-    - Generates a `ToolMessage` subclass with all input fields typed.
-    - Provides a `call_tool_async()` under the hood -- this is the "raw" MCP tool call,
-      returning a string.
-    - If you define your own `handle_async()`, it overrides the default. Typically,
-you would override it to customize either the input or the output of the tool call, or both.
-    - If you don't define your own `handle_async()`, it defaults to just returning the
-      value of the `call_tool_async()` method.
-
-Here is a simple example of using the `@mcp_tool` decorator to create a Langroid tool:
-
-```python
-from fastmcp.server import FastMCP
-from langroid.agent.tools.mcp import mcp_tool
-import langroid as lr
-
-# Define your MCP server (pydantic v2 for schema)
-server = FastMCP("MyServer")
-
-@mcp_tool(server, "greet")
-class GreetTool(lr.ToolMessage):
-    """Say hello to someone."""
-
-    async def handle_async(self) -> str:
-        # Customize post-processing
-        raw = await self.call_tool_async()
-        return f"💬 {raw}"
-```
-
-Using the decorator method allows you to customize the `handle_async` method of the
-tool, or add additional fields to the `ToolMessage`. 
-You may want to customize the input to the tool, or the tool result before it is sent back to 
-the LLM. If you don't override it, the default behavior is to simply return the value of 
-the "raw" MCP tool call `await self.call_tool_async()`. 
-
-```python
-@mcp_tool(server, "calculate")
-class CalcTool(ToolMessage):
-    """Perform complex calculation."""
-
-    async def handle_async(self) -> str:
-        result = await self.call_tool_async()
-        # Add context or emojis, etc.
-        return f"🧮 Result is *{result}*"
-```
-
----
-
-## 3. Enabling Tools in Your Agent
-
-Once you’ve created a Langroid `ToolMessage` subclass from an MCP server, 
-you can enable it on a `ChatAgent`, just like you normally would. Below is an example of using 
-the [Exa MCP server](https://docs.exa.ai/examples/exa-mcp) to create a 
-Langroid web search tool, enable a `ChatAgent` to use it, and then set up a `Task` to 
-run the agent loop.
-
-First we must define the appropriate `ClientTransport` for the MCP server:
-```python
-# define the transport
-transport = NpxStdioTransport(
-    package="exa-mcp-server",
-    env_vars=dict(EXA_API_KEY=os.getenv("EXA_API_KEY")),
-)
-```
-
-Then we use the `@mcp_tool` decorator to create a `ToolMessage` 
-subclass representing the web search tool. Note that one reason to use the decorator
-to define our tool is so we can specify a custom `handle_async` method that
-controls what is sent to the LLM after the actual raw MCP tool-call
-(the `call_tool_async` method) is made.
-
-```python
-# the second arg specifically refers to the `web_search_exa` tool available
-# on the server defined by the `transport` variable.
-@mcp_tool(transport, "web_search_exa")
-class ExaSearchTool(lr.ToolMessage):
-    async def handle_async(self):
-        result: str = await self.call_tool_async()
-        return f"""
-        Below are the results of the web search:
-        
-        <WebSearchResult>
-        {result}
-        </WebSearchResult>
-        
-        Use these results to answer the user's original question.
-        """
-
-```
-
-If we did not want to override the `handle_async` method, we could simply have
-created the `ExaSearchTool` class programmatically via the `get_tool_async` 
-function as shown above, i.e.:
-
-```python
-from langroid.agent.tools.mcp import get_tool_async
-
-ExaSearchTool = await get_tool_async(transport, "web_search_exa")
-```
-
-We can now define our main function where we create our `ChatAgent`,
-attach the `ExaSearchTool` to it, define the `Task`, and run the task loop.
-
-```python
-async def main():
-    agent = lr.ChatAgent(
-        lr.ChatAgentConfig(
-            # forward to user when LLM doesn't use a tool
-            handle_llm_no_tool=NonToolAction.FORWARD_USER,
-            llm=lm.OpenAIGPTConfig(
-                max_output_tokens=1000,
-                # this defaults to True, but we set it to False so we can see output
-                async_stream_quiet=False,
-            ),
-        )
-    )
-
-    # enable the agent to use the web-search tool
-    agent.enable_message(ExaSearchTool)
-    # make task with interactive=False =>
-    # waits for user only when LLM doesn't use a tool
-    task = lr.Task(agent, interactive=False)
-    await task.run_async()
-```
-
-See [`exa-web-search.py`](https://github.com/langroid/langroid/blob/main/examples/mcp/exa-web-search.py) for a full working example of this.
-</file>
-
 <file path="docs/tutorials/non-openai-llms.md">
 # Using Langroid with Non-OpenAI LLMs
 
@@ -59496,89 +60131,6 @@ agent = lr.ChatAgent(agent_config)
 task = lr.Task(agent)
 </file>
 
-<file path="examples/mcp/claude-code-mcp-single.py">
-"""
-Enable a Langroid agent to use a SINGLE MCP Tool from 
-Claude Code's MCP server.
-
-Similar to claude-code-mcp.py but showing how to use a single tool, i.e.,
-Claude-Code's special Grep tool that is built on ripgrep.
-
-Run like this (omitting the `--model` argument will use the default gpt-5-mini):
-
-    uv run examples/mcp/claude-code-mcp-single.py --model gpt-5-mini
-
-
-"""
-⋮----
-transport = StdioTransport(
-⋮----
-# Illustrating how we can:
-# - use the MCP tool decorator to create a Langroid ToolMessage subclass
-# - override the handle_async() method to customize the output, sent to the LLM
-⋮----
-@mcp_tool(transport, "Grep")
-class GrepTool(lr.ToolMessage)
-⋮----
-async def handle_async(self)
-⋮----
-# Force a predictable, structured response shape from Grep so the
-# handler can parse and decide deterministically.
-# "content" mode returns matching lines along with numLines/numMatches.
-⋮----
-# CODEX: Minimal, readable post‑processing — parse the structured JSON
-# and present plain text fields (no JSON) so the LLM can skim quickly.
-# The task will terminate on the LLM’s non‑tool reply due to
-# handle_llm_no_tool=Done.
-# Call the actual tool. Langroid returns a tuple (text, files). Unpack
-# the text payload for presentation.
-result = await self.call_tool_async()
-⋮----
-summary = None
-lines = None
-⋮----
-data = json.loads(result_text) if isinstance(result_text, str) else {}
-⋮----
-mode = data.get("mode", "?")
-num_files = data.get("numFiles")
-filenames = data.get("filenames") or []
-num_lines = data.get("numLines")
-num_matches = data.get("numMatches")
-applied_limit = data.get("appliedLimit")
-applied_offset = data.get("appliedOffset")
-content_block = data.get("content", "")
-⋮----
-parts = [
-summary = "\n".join(p for p in parts if p)
-lines = str(content_block or "").rstrip()
-⋮----
-# Fallback: show raw payload if parsing failed
-⋮----
-async def main(model: str = "")
-⋮----
-agent = lr.ChatAgent(
-⋮----
-# when the LLM responds without a tool, finish with that content
-# (prevents waiting for user input in non-interactive mode)
-⋮----
-# this defaults to True, but we set it to False so we can see output
-⋮----
-# enable the agent to use the grep tool
-⋮----
-task = lr.Task(agent, interactive=False)
-user_prompt = """
-⋮----
-result = await task.run_async(user_prompt)
-⋮----
-def run_main(**kwargs) -> None
-⋮----
-"""Run the async main function with a proper event loop.
-
-        Args:
-            **kwargs: Keyword arguments to pass to the main function.
-        """
-</file>
-
 <file path="langroid/agent/callbacks/chainlit.py">
 """
 Callbacks for Chainlit integration.
@@ -59810,404 +60362,6 @@ class ChainlitTaskCallbacks(ChainlitAgentCallbacks)
 """Show sub-task response as a step, nested at the right level."""
 ⋮----
 # The step should nest under the calling agent's last step
-</file>
-
-<file path="langroid/agent/special/sql/sql_chat_agent.py">
-"""
-Agent that allows interaction with an SQL database using SQLAlchemy library.
-The agent can execute SQL queries in the database and return the result.
-
-Functionality includes:
-- adding table and column context
-- asking a question about a SQL schema
-"""
-⋮----
-# sqlglot is required for the statement-type allowlist enforced in
-# `_validate_query`. Importing it at module load ensures the security
-# guarantee cannot be silently bypassed by a partial/stale install.
-⋮----
-logger = logging.getLogger(__name__)
-⋮----
-console = Console()
-⋮----
-DEFAULT_SQL_CHAT_SYSTEM_MESSAGE = """
-⋮----
-ADDRESSING_INSTRUCTION = """
-⋮----
-DONE_INSTRUCTION = f"""
-⋮----
-SQL_ERROR_MSG = "There was an error in your SQL Query"
-⋮----
-# Dialect-specific SQL patterns that enable code execution, arbitrary file
-# access, or other escapes from the database engine. Matched against the raw
-# query text (case-insensitive) as a defense-in-depth layer in addition to the
-# sqlglot-based statement-type allowlist.
-_DANGEROUS_SQL_PATTERNS: List["re.Pattern[str]"] = [
-⋮----
-# PostgreSQL: COPY ... FROM/TO PROGRAM executes shell commands as the DB
-# server OS user.
-⋮----
-# PostgreSQL server-side filesystem / log / WAL access. Match the whole
-# pg_read*, pg_stat*, pg_ls*, pg_current_logfile family rather than naming
-# individual functions: near-name functions (pg_read_file vs
-# pg_read_server_file, pg_ls_logdir vs pg_ls_dir, pg_stat_file, ...) all
-# yield the same file/metadata disclosure primitive.
-⋮----
-# MySQL/MariaDB filesystem
-⋮----
-# SQLite: load_extension enables loading arbitrary shared objects;
-# ATTACH can read/write arbitrary files. The DATABASE keyword is optional
-# per the SQLite grammar (ATTACH [DATABASE] expr AS schema-name), so match
-# both forms.
-⋮----
-# SQL Server: command execution, OLE automation, and ad-hoc external data
-# sources (OPENDATASOURCE is the connection-string counterpart of
-# OPENROWSET; both can read remote/UNC files).
-⋮----
-# Generic: stored-program creation and procedural language extensions.
-# LANGUAGE / RULE / EVENT TRIGGER / FOREIGN TABLE are additional PostgreSQL
-# primitives that can register attacker-controlled code.
-⋮----
-# Default set of SQL statement types the agent is allowed to execute when
-# `allow_dangerous_operations` is False. SELECT-only is safe for Q&A workloads.
-_DEFAULT_ALLOWED_STATEMENTS: List[str] = ["SELECT"]
-⋮----
-class SQLChatAgentConfig(ChatAgentConfig)
-⋮----
-system_message: str = DEFAULT_SQL_CHAT_SYSTEM_MESSAGE
-user_message: None | str = None
-cache: bool = True  # cache results
-debug: bool = False
-use_helper: bool = True
-is_helper: bool = False
-stream: bool = True  # allow streaming where needed
-database_uri: str = ""  # Database URI
-database_session: None | Session = None  # Database session
-vecdb: None | VectorStoreConfig = None
-context_descriptions: Dict[str, Dict[str, Union[str, Dict[str, str]]]] = {}
-use_schema_tools: bool = False
-multi_schema: bool = False
-# whether the agent is used in a continuous chat with user,
-# as opposed to returning a result from the task.run()
-chat_mode: bool = False
-addressing_prefix: str = ""
-max_result_rows: int | None = None  # limit query results to this
-max_retained_tokens: int | None = None  # limit history of query results to this
-⋮----
-# --- Security controls (see CVE-2026-25879) ---------------------------
-# By default, the agent only executes SELECT statements and rejects any
-# query that matches a known dangerous pattern (e.g. PostgreSQL
-# `COPY ... FROM PROGRAM`, MySQL `INTO OUTFILE`, SQLite `load_extension`,
-# MSSQL `xp_cmdshell`). The LLM-generated SQL is influenceable by prompt
-# injection — including injection via data the LLM reads back from the
-# database — so executing it without restrictions is unsafe when the DB
-# role has elevated privileges.
-#
-# To enable writes: extend allowed_statement_types, e.g. ["SELECT",
-# "INSERT", "UPDATE", "DELETE"]. To disable all checks (only do this with
-# a least-privilege DB role and trusted prompts): set
-# allow_dangerous_operations=True.
-allowed_statement_types: List[str] = list(_DEFAULT_ALLOWED_STATEMENTS)
-allow_dangerous_operations: bool = False
-⋮----
-"""
-    Optional, but strongly recommended, context descriptions for tables, columns, 
-    and relationships. It should be a dictionary where each key is a table name 
-    and its value is another dictionary. 
-
-    In this inner dictionary:
-    - The 'description' key corresponds to a string description of the table.
-    - The 'columns' key corresponds to another dictionary where each key is a 
-    column name and its value is a string description of that column.
-    - The 'relationships' key corresponds to another dictionary where each key 
-    is another table name and the value is a description of the relationship to 
-    that table.
-
-    If multi_schema support is enabled, the tables names in the description
-    should be of the form 'schema_name.table_name'.
-
-    For example:
-    {
-        'table1': {
-            'description': 'description of table1',
-            'columns': {
-                'column1': 'description of column1 in table1',
-                'column2': 'description of column2 in table1'
-            }
-        },
-        'table2': {
-            'description': 'description of table2',
-            'columns': {
-                'column3': 'description of column3 in table2',
-                'column4': 'description of column4 in table2'
-            }
-        }
-    }
-    """
-⋮----
-class SQLChatAgent(ChatAgent)
-⋮----
-"""
-    Agent for chatting with a SQL database
-    """
-⋮----
-used_run_query: bool = False
-llm_responded: bool = False
-⋮----
-def __init__(self, config: "SQLChatAgentConfig") -> None
-⋮----
-"""Initialize the SQLChatAgent.
-
-        Raises:
-            ValueError: If database information is not provided in the config.
-        """
-⋮----
-# Caution - this updates the self.config.system_message!
-⋮----
-# helper_config.system_message is now the fully-populated sys msg of
-# the main SQLAgent.
-⋮----
-def _validate_config(self, config: "SQLChatAgentConfig") -> None
-⋮----
-"""Validate the configuration to ensure all necessary fields are present."""
-⋮----
-def _init_database(self) -> None
-⋮----
-"""Initialize the database engine and session."""
-⋮----
-def _init_metadata(self) -> None
-⋮----
-"""Initialize the database metadata."""
-⋮----
-inspector = inspect(self.engine)
-⋮----
-metadata = MetaData(schema=schema)
-⋮----
-def _init_table_metadata(self) -> None
-⋮----
-"""Initialize metadata for the tables present in the database."""
-⋮----
-def _init_system_message(self) -> None
-⋮----
-"""Initialize the system message."""
-message = self._format_message()
-⋮----
-allowed = sorted(
-⋮----
-def _init_tools(self) -> None
-⋮----
-"""Initialize sys msg and tools."""
-# Create a custom RunQueryTool class with the desired max_retained_tokens
-⋮----
-class CustomRunQueryTool(RunQueryTool)
-⋮----
-_max_retained_tokens = self.config.max_retained_tokens
-⋮----
-def _format_message(self) -> str
-⋮----
-"""Format the system message based on the engine and table metadata."""
-⋮----
-def _enable_schema_tools(self) -> None
-⋮----
-"""Enable tools for schema-related functionalities."""
-⋮----
-def _clarify_answer_instruction(self) -> str
-⋮----
-"""
-        Prompt to use when asking LLM to clarify intent of
-        an already-generated response
-        """
-⋮----
-def _clarifying_message(self) -> str
-⋮----
-tools_instruction = f"""
-⋮----
-"""
-        We'd end up here if the current msg has no tool.
-        If this is from LLM, we may need to handle the scenario where
-        it may have "forgotten" to generate a tool.
-        """
-⋮----
-# send any Non-tool msg to the user
-⋮----
-# Agent intent not clear => use the helper agent to
-# do what this agent should have done, e.g. generate tool, etc.
-# This is likelier to succeed since this agent has no "baggage" of
-# prior conversation, other than the system msg, and special
-# "Intent-interpretation" instructions.
-⋮----
-AnyTool = self._get_any_tool_message(optional=False)
-⋮----
-recovery_message = self._strict_recovery_instructions(
-result = self.llm_response(recovery_message)
-# remove the recovery_message (it has User role) from the chat history,
-# else it may cause the LLM to directly use the AnyTool.
-self.delete_last_message(role=Role.USER)  # delete last User-role msg
-⋮----
-response = self.helper_agent.llm_response(message)
-tools = self.try_get_tool_messages(response)
-⋮----
-# fall back on the clarification message
-⋮----
-def retry_query(self, e: Exception, query: str) -> str
-⋮----
-"""
-        Generate an error message for a failed SQL query and return it.
-
-        Parameters:
-        e (Exception): The exception raised during the SQL query execution.
-        query (str): The SQL query that failed.
-
-        Returns:
-        str: The error message.
-        """
-⋮----
-# Optional part to be included based on `use_schema_tools`
-optional_schema_description = ""
-⋮----
-optional_schema_description = f"""\
-⋮----
-# Construct the error message
-error_message_template = f"""\
-⋮----
-def _available_tool_names(self) -> str
-⋮----
-def _tool_result_llm_answer_prompt(self) -> str
-⋮----
-"""
-        Prompt to use at end of tool result,
-        to guide LLM, for the case where it wants to answer the user's query
-        """
-⋮----
-def _sqlglot_dialect(self) -> Optional[str]
-⋮----
-"""Map the SQLAlchemy dialect name to a sqlglot dialect name."""
-⋮----
-name: str = str(self.engine.dialect.name)
-# sqlglot uses 'postgres', not 'postgresql'; 'tsql' for MSSQL.
-mapping: Dict[str, str] = {"postgresql": "postgres", "mssql": "tsql"}
-⋮----
-def _validate_query(self, query: str) -> Optional[str]
-⋮----
-"""
-        Check whether `query` is permitted under the agent's security config.
-
-        Returns None if the query may be executed, otherwise an error message
-        explaining why it was rejected (to be relayed to the LLM).
-        """
-⋮----
-allowed = {t.strip().upper() for t in self.config.allowed_statement_types}
-⋮----
-statements = sqlglot.parse(query, read=self._sqlglot_dialect())
-⋮----
-kind_map = {
-⋮----
-kind = next(
-⋮----
-def run_query(self, msg: RunQueryTool) -> str
-⋮----
-"""
-        Handle a RunQueryTool message by executing a SQL query and returning the result.
-
-        Args:
-            msg (RunQueryTool): The tool-message to handle.
-
-        Returns:
-            str: The result of executing the SQL query.
-        """
-query = msg.query
-session = self.Session
-⋮----
-rejection = self._validate_query(query)
-⋮----
-query_result = session.execute(text(query))
-⋮----
-# attempt to fetch results: should work for normal SELECT queries
-rows = query_result.fetchall()
-n_rows = len(rows)
-⋮----
-rows = rows[: self.config.max_result_rows]
-⋮----
-response_message = self._format_rows(rows)
-⋮----
-# If we get here, it's a non-SELECT query (UPDATE, INSERT, DELETE)
-affected_rows = query_result.rowcount  # type: ignore
-response_message = f"""
-⋮----
-response_message = self.retry_query(e, query)
-⋮----
-final_message = f"""
-⋮----
-def _format_rows(self, rows: Sequence[Row[Any]]) -> str
-⋮----
-"""
-        Format the rows fetched from the query result into a string.
-
-        Args:
-            rows (list): List of rows fetched from the query result.
-
-        Returns:
-            str: Formatted string representation of rows.
-        """
-# TODO: UPDATE FORMATTING
-⋮----
-def get_table_names(self, msg: GetTableNamesTool) -> str
-⋮----
-"""
-        Handle a GetTableNamesTool message by returning the names of all tables in the
-        database.
-
-        Returns:
-            str: The names of all tables in the database.
-        """
-⋮----
-table_names = [", ".join(md.tables.keys()) for md in self.metadata]
-⋮----
-def get_table_schema(self, msg: GetTableSchemaTool) -> str
-⋮----
-"""
-        Handle a GetTableSchemaTool message by returning the schema of all provided
-        tables in the database.
-
-        Returns:
-            str: The schema of all provided tables in the database.
-        """
-tables = msg.tables
-result = ""
-⋮----
-table = self.table_metadata.get(table_name)
-⋮----
-def get_column_descriptions(self, msg: GetColumnDescriptionsTool) -> str
-⋮----
-"""
-        Handle a GetColumnDescriptionsTool message by returning the descriptions of all
-        provided columns from the database.
-
-        Returns:
-            str: The descriptions of all provided columns from the database.
-        """
-table = msg.table
-columns = msg.columns.split(", ")
-result = f"\nTABLE: {table}"
-descriptions = self.config.context_descriptions.get(table)
-⋮----
-result += f"\n{col} => {descriptions['columns'][col]}"  # type: ignore
-⋮----
-class SQLHelperAgent(SQLChatAgent)
-⋮----
-"""Set up helper sys msg"""
-⋮----
-# Note that self.config.system_message is already set to the
-# parent SQLAgent's system_message
-⋮----
-# note that the initial msg in chat history will contain:
-# - system message
-# - tool instructions
-# so the final_instructions will be at the end of this initial msg
-⋮----
-message_str = message if isinstance(message, str) else message.content
-instruc_msg = f"""
-# user response_forget to avoid accumulating the chat history
 </file>
 
 <file path="langroid/agent/special/doc_chat_agent.py">
@@ -61129,479 +61283,6 @@ def justify_response(self) -> ChatDocument | None
 """Show evidence for last response"""
 ⋮----
 source = self.response.metadata.source
-</file>
-
-<file path="langroid/agent/tools/mcp/fastmcp_client.py">
-# Optional transports; import guarded for environments without uvx/npx
-⋮----
-except Exception:  # pragma: no cover - optional
-NpxStdioTransport = tuple()  # type: ignore
-UvxStdioTransport = tuple()  # type: ignore
-⋮----
-load_dotenv()  # load environment variables from .env
-⋮----
-# Concrete server/transport spec accepted by fastmcp.Client
-FastMCPServerConcrete: TypeAlias = str | FastMCP[Any] | ClientTransport | AnyUrl
-# Public spec we accept: concrete spec or a zero-arg factory returning a spec
-FastMCPServerSpec: TypeAlias = (
-⋮----
-class FastMCPClient
-⋮----
-"""A client for interacting with a FastMCP server.
-
-    Provides async context manager functionality to safely manage resources.
-    """
-⋮----
-logger = logging.getLogger(__name__)
-_cm: Optional[Client[ClientTransport]] = None
-client: Optional[Client[ClientTransport]] = None
-read_timeout_seconds: datetime.timedelta | None = None
-⋮----
-sampling_handler: SamplingHandler | None = None,  # type: ignore
-roots: RootsList | RootsHandler | None = None,  # type: ignore
-⋮----
-"""Initialize the FastMCPClient.
-
-        Args:
-            server: FastMCP server or path to such a server
-        """
-⋮----
-# Default a slightly larger read timeout for stdio transports on first
-# connects. Allows flaky subprocess servers a bit more time to boot.
-⋮----
-default_secs = int(os.getenv("LANGROID_MCP_READ_TIMEOUT", "15"))
-⋮----
-async def __aenter__(self) -> "FastMCPClient"
-⋮----
-"""Enter the async context manager and connect inner client.
-
-        Always obtain a fresh transport/spec via a factory, then connect.
-        If the session initialization fails due to a transient stdio issue
-        (e.g., ClosedResourceError / connection closed), retry once with a
-        new transport instance for better resilience across fastmcp/mcp
-        versions and server launch timing.
-        """
-# Always normalize to a server factory and create a fresh spec
-server_factory = self._as_server_factory(self.server)
-⋮----
-# Configurable retry/backoff for transient stdio startup races.
-max_retries = int(os.getenv("LANGROID_MCP_CONNECT_RETRIES", "6"))
-⋮----
-backoff_base = float(os.getenv("LANGROID_MCP_CONNECT_BACKOFF_BASE", "0.35"))
-⋮----
-backoff_base = 0.35
-⋮----
-last_err: Optional[BaseException] = None
-⋮----
-server_spec: FastMCPServerConcrete = server_factory()
-# create inner client context manager
-self._cm = Client(  # type: ignore[assignment]
-⋮----
-# actually enter it (opens the session)
-self.client = await self._cm.__aenter__()  # type: ignore
-⋮----
-# Common transient failures when a subprocess exits early or
-# closes during initialize. Retry once with a fresh transport.
-⋮----
-last_err = e
-# ensure we reset _cm/client before retry
-⋮----
-await self._cm.__aexit__(None, None, None)  # type: ignore
-⋮----
-# brief backoff to allow server process to finish booting
-⋮----
-# fastmcp wraps ClosedResourceError into RuntimeError
-# "Server session was closed unexpectedly". Treat as transient.
-emsg = str(e)
-⋮----
-await self._cm.__aexit__(None, None, None)  # type: ignore
-⋮----
-# otherwise re-raise
-⋮----
-# If we get here both attempts failed
-⋮----
-async def connect(self) -> None
-⋮----
-"""Open the underlying session."""
-⋮----
-async def close(self) -> None
-⋮----
-"""Close the underlying session."""
-⋮----
-"""Exit the async context manager and close inner client."""
-# exit and close the inner fastmcp.Client
-⋮----
-await self._cm.__aexit__(exc_type, exc_val, exc_tb)  # type: ignore
-⋮----
-def __del__(self) -> None
-⋮----
-"""Warn about unclosed persistent connections."""
-⋮----
-"""Convert a JSON Schema snippet into a (type, Field) tuple.
-
-        Args:
-            name: Name of the field.
-            schema: JSON Schema for this field.
-            prefix: Prefix to use for nested model names.
-            is_required: Whether this field is required (from JSON Schema "required").
-
-        Returns:
-            A tuple of (python_type, Field(...)) for create_model.
-        """
-t = schema.get("type")
-# Use schema default if present, otherwise:
-# ... for required fields, None for optional fields
-⋮----
-default = schema["default"]
-⋮----
-default = ... if is_required else None
-desc = schema.get("description")
-# Object → nested BaseModel
-⋮----
-sub_name = f"{prefix}_{name.capitalize()}"
-sub_fields: Dict[str, Tuple[type, Any]] = {}
-# Get required fields for this nested object
-nested_required = set(schema.get("required", []))
-⋮----
-submodel = create_model(  # type: ignore
-# Wrap in Optional if not required
-model_type = submodel if is_required else Optional[submodel]
-return model_type, Field(default=default, description=desc)  # type: ignore
-# Array → List of items
-⋮----
-array_type = List[item_type]  # type: ignore
-⋮----
-array_type = Optional[array_type]  # type: ignore
-return array_type, Field(default=default, description=desc)  # type: ignore
-# Primitive types
-⋮----
-str_type = str if is_required else Optional[str]
-⋮----
-int_type = int if is_required else Optional[int]
-⋮----
-float_type = float if is_required else Optional[float]
-⋮----
-bool_type = bool if is_required else Optional[bool]
-⋮----
-# Fallback or unions
-⋮----
-# Default fallback
-⋮----
-async def get_tool_async(self, tool_name: str) -> Type[ToolMessage]
-⋮----
-"""
-        Create a Langroid ToolMessage subclass from the MCP Tool
-        with the given `tool_name`.
-        """
-⋮----
-target = await self.get_mcp_tool_async(tool_name)
-⋮----
-props = target.inputSchema.get("properties", {})
-# Get the list of required fields from JSON Schema
-required_fields = set(target.inputSchema.get("required", []))
-fields: Dict[str, Tuple[type, Any]] = {}
-⋮----
-# Convert target.name to CamelCase and add Tool suffix
-parts = target.name.replace("-", "_").split("_")
-camel_case = "".join(part.capitalize() for part in parts)
-model_name = f"{camel_case}Tool"
-⋮----
-# IMPORTANT: Avoid clashes with reserved field names in Langroid ToolMessage!
-# First figure out which field names are reserved
-reserved = set(_BaseToolMessage.__annotations__.keys())
-⋮----
-renamed: Dict[str, str] = {}
-new_fields: Dict[str, Tuple[type, Any]] = {}
-⋮----
-new_name = fname + "__"
-⋮----
-# now replace fields with our renamed‐aware mapping
-fields = new_fields
-⋮----
-# create Langroid ToolMessage subclass, with expected fields.
-tool_model = cast(
-⋮----
-create_model(  # type: ignore[call-overload]
-⋮----
-# Store ALL client configuration needed to recreate a client
-client_config = {
-⋮----
-# Always store a SERVER FACTORY to ensure a fresh transport per call
-⋮----
-tool_model._client_config = client_config  # type: ignore [attr-defined]
-tool_model._renamed_fields = renamed  # type: ignore[attr-defined]
-⋮----
-# 2) define an arg-free call_tool_async()
-async def call_tool_async(itself: ToolMessage) -> Any
-⋮----
-# pack up the payload
-# Get exclude fields from model config with proper type checking
-exclude_fields = set()
-model_config = getattr(itself, "model_config", {})
-⋮----
-exclude_list = model_config["json_schema_extra"]["exclude"]
-⋮----
-exclude_fields = set(exclude_list)
-⋮----
-# Add standard excluded fields
-⋮----
-# Exclude None values - MCP servers don't expect None for optional params
-payload = itself.model_dump(exclude=exclude_fields, exclude_none=True)
-⋮----
-# restore any renamed fields
-for orig, new in itself.__class__._renamed_fields.items():  # type: ignore
-⋮----
-client_cfg = getattr(itself.__class__, "_client_config", None)  # type: ignore
-⋮----
-# Fallback or error - ideally _client_config should always exist
-⋮----
-# Connect the client if not yet connected and keep the connection open
-⋮----
-# open a fresh client, call the tool, then close
-async with FastMCPClient(**client_cfg) as client:  # type: ignore
-⋮----
-tool_model.call_tool_async = call_tool_async  # type: ignore
-⋮----
-# 3) define handle_async() method with optional agent parameter
-⋮----
-"""
-                Auto-generated handler for MCP tool. Returns ChatDocument with files
-                if files are present and agent is provided, otherwise returns text.
-
-                To override: define your own handle_async method with matching signature
-                if you need file handling, or simpler signature if you only need text.
-                """
-response = await self.call_tool_async()  # type: ignore[attr-defined]
-⋮----
-# If we have files and an agent is provided, return a ChatDocument
-⋮----
-# Otherwise, just return the text content
-⋮----
-# add the handle_async() method to the tool model
-tool_model.handle_async = handle_async  # type: ignore
-⋮----
-async def get_tools_async(self) -> List[Type[ToolMessage]]
-⋮----
-"""
-        Get all available tools as Langroid ToolMessage classes,
-        handling nested schemas, with `handle_async` methods
-        """
-⋮----
-resp = await self.client.list_tools()
-⋮----
-async def get_mcp_tool_async(self, name: str) -> Optional[Tool]
-⋮----
-"""Find the "original" MCP Tool (i.e. of type mcp.types.Tool) on the server
-         matching `name`, or None if missing. This contains the metadata for the tool:
-         name, description, inputSchema, etc.
-
-        Args:
-            name: Name of the tool to look up.
-
-        Returns:
-            The raw Tool object from the server, or None.
-        """
-⋮----
-resp: List[Tool] = await self.client.list_tools()
-⋮----
-"""Normalize a server spec to a zero-arg factory.
-
-        - If already callable, return as-is.
-        - If a ClientTransport instance, return a factory that yields the SAME
-          instance. This preserves state for keep-alive stdio transports (e.g.,
-          npx/uvx servers) so multi-call workflows can share process state.
-          Recreating a fresh transport each call would lose stateful servers
-          like `@modelcontextprotocol/server-memory` and break tests.
-        - Otherwise return a factory that yields the given spec.
-        """
-if callable(server):  # type: ignore[arg-type]
-return server  # type: ignore[return-value]
-⋮----
-# Reuse policy split:
-# - Npx/Uvx stdio transports: reuse the SAME instance to preserve
-#   keep-alive subprocess state (stateful MCP servers).
-# - Plain StdioTransport: CLONE a fresh transport to avoid reusing
-#   process/pipes across decorator-time schema fetch and runtime calls
-#   (some stdio servers close after first session, like CLI wrappers).
-⋮----
-) or (  # type: ignore[arg-type]
-⋮----
-):  # type: ignore[arg-type]
-⋮----
-# If optional classes are tuples (import failed), fall through
-⋮----
-# Best‑effort clone with back‑compat: only pass kwargs supported
-# by this installed fastmcp version's StdioTransport.__init__.
-sig = inspect.signature(StdioTransport.__init__)
-params = sig.parameters
-⋮----
-def _pick(name: str, default: Any = None) -> Any
-⋮----
-# Required in all known versions
-cmd = getattr(server, "command", None)
-args = list(getattr(server, "args", []) or [])
-⋮----
-# Optional, filter by signature presence
-env = _pick("env")
-cwd = _pick("cwd")
-keep_alive = _pick("keep_alive")
-log_file = _pick("log_file")
-⋮----
-def _factory() -> StdioTransport
-⋮----
-kwargs = {"command": cmd, "args": args}
-⋮----
-return StdioTransport(**kwargs)  # type: ignore[arg-type]
-⋮----
-# Default for other ClientTransport types: reuse
-⋮----
-return lambda: server  # type: ignore[return-value]
-⋮----
-# Log more detailed error information
-error_content = None
-⋮----
-error_content = [
-⋮----
-error_content = [f"Could not extract error content: {str(e)}"]
-⋮----
-# 1) Collect any plain TextContent first. This preserves legacy behavior
-# for simple servers that return only text. If we have text, prefer it
-# over structuredContent to avoid surprising downstream code.
-results_text: list[str] = [
-results_file: list[FileAttachment] = []
-⋮----
-# Also collect resources alongside text; callers may want them.
-⋮----
-# 2) No plain text — use structuredContent if available. To maintain
-# backwards compatibility, unwrap simple shapes like {"result": 5}
-# into "5"; otherwise serialize the full object as JSON for fidelity.
-⋮----
-sc = result.structuredContent
-⋮----
-# Unwrap primitives directly
-⋮----
-# Unwrap single-key primitive dicts commonly used by tools
-⋮----
-# Otherwise, serialize to JSON for rich/structured tools
-⋮----
-# 3) Nothing usable — return empty text and any files
-⋮----
-"""Call an MCP tool with the given arguments.
-
-        Args:
-            tool_name: Name of the tool to call.
-            arguments: Arguments to pass to the tool.
-
-        Returns:
-            The result of the tool call.
-        """
-⋮----
-# Prefer validated call; if server fails to provide structured content
-# despite declaring a schema, fall back to a raw request to bypass
-# client-side validation and still surface the data.
-⋮----
-result: CallToolResult = await self.client.session.call_tool(
-⋮----
-msg = str(e)
-⋮----
-result = await self.client.session.send_request(  # type: ignore[assignment]
-results = self._convert_tool_result(tool_name, result)
-⋮----
-# ==============================================================================
-# Convenience functions (wrappers around FastMCPClient methods)
-# These are useful for one-off calls without needing to manage the
-# FastMCPClient context explicitly.
-⋮----
-"""Get a single Langroid ToolMessage subclass for a specific MCP tool name (async).
-
-    This is a convenience wrapper that creates a temporary FastMCPClient.
-
-    Args:
-        server: Specification of the FastMCP server to connect to.
-        tool_name: The name of the tool to retrieve.
-        **client_kwargs: Additional keyword arguments to pass to the
-            FastMCPClient constructor (e.g., sampling_handler, roots).
-
-    Returns:
-        A dynamically created Langroid ToolMessage subclass representing the
-        requested tool.
-    """
-⋮----
-"""Get a single Langroid ToolMessage subclass
-    for a specific MCP tool name (synchronous).
-
-    This is a convenience wrapper that creates a temporary FastMCPClient and runs the
-    async `get_tool_async` function using `asyncio.run()`.
-
-    Args:
-        server: Specification of the FastMCP server to connect to.
-        tool_name: The name of the tool to retrieve.
-        **client_kwargs: Additional keyword arguments to pass to the
-            FastMCPClient constructor (e.g., sampling_handler, roots).
-
-    Returns:
-        A dynamically created Langroid ToolMessage subclass representing the
-        requested tool.
-    """
-⋮----
-"""Get all available tools as Langroid ToolMessage subclasses (async).
-
-    This is a convenience wrapper that creates a temporary FastMCPClient.
-
-    Args:
-        server: Specification of the FastMCP server to connect to.
-        **client_kwargs: Additional keyword arguments to pass to the
-            FastMCPClient constructor (e.g., sampling_handler, roots).
-
-    Returns:
-        A list of dynamically created Langroid ToolMessage subclasses
-        representing all available tools on the server.
-    """
-⋮----
-"""Get all available tools as Langroid ToolMessage subclasses (synchronous).
-
-    This is a convenience wrapper that creates a temporary FastMCPClient and runs the
-    async `get_tools_async` function using `asyncio.run()`.
-
-    Args:
-        server: Specification of the FastMCP server to connect to.
-        **client_kwargs: Additional keyword arguments to pass to the
-            FastMCPClient constructor (e.g., sampling_handler, roots).
-
-    Returns:
-        A list of dynamically created Langroid ToolMessage subclasses
-        representing all available tools on the server.
-    """
-⋮----
-"""Get the raw MCP Tool object for a specific tool name (async).
-
-    This is a convenience wrapper that creates a temporary FastMCPClient to
-    retrieve the tool definition from the server.
-
-    Args:
-        server: Specification of the FastMCP server to connect to.
-        name: The name of the tool to look up.
-        **client_kwargs: Additional keyword arguments to pass to the
-            FastMCPClient constructor.
-
-    Returns:
-        The raw `mcp.types.Tool` object from the server, or `None` if the tool
-        is not found.
-    """
-⋮----
-"""Get all available raw MCP Tool objects from the server (async).
-
-    This is a convenience wrapper that creates a temporary FastMCPClient to
-    retrieve the list of tool definitions from the server.
-
-    Args:
-        server: Specification of the FastMCP server to connect to.
-        **client_kwargs: Additional keyword arguments to pass to the
-            FastMCPClient constructor.
-
-    Returns:
-        A list of raw `mcp.types.Tool` objects available on the server.
-    """
 </file>
 
 <file path="plugins/langroid/skills/patterns/quiet-mode.md">
@@ -63281,6 +62962,726 @@ tools_from_b = agent_b.get_tool_messages(chat_doc, all_tools=True)
 tools_from_b_cached = agent_b.get_tool_messages(chat_doc, all_tools=True)
 </file>
 
+<file path="tests/main/test_vector_stores.py">
+embed_cfg = OpenAIEmbeddingsConfig(
+⋮----
+phrases = SimpleNamespace(
+⋮----
+class MyDocMetaData(DocMetaData)
+⋮----
+id: str
+⋮----
+class MyDoc(Document)
+⋮----
+content: str
+metadata: MyDocMetaData
+⋮----
+stored_docs = [
+⋮----
+@pytest.fixture(scope="function")
+def vecdb(request) -> VectorStore
+⋮----
+# Unique suffix per pytest-xdist worker so parallel workers don't collide
+# on the same Qdrant collection in the shared local container (PR #1030).
+worker = os.environ.get("PYTEST_XDIST_WORKER", "main")
+⋮----
+qd_dir = ":memory:"
+qd_cfg = QdrantDBConfig(
+qd = QdrantDB(qd_cfg)
+⋮----
+qd_dir = ".qdrant/cloud/" + embed_cfg.model_type
+qd_cfg_cloud = QdrantDBConfig(
+qd_cloud = QdrantDB(qd_cfg_cloud)
+⋮----
+wv_cfg_cloud = WeaviateDBConfig(
+weaviate_cloud = WeaviateDB(wv_cfg_cloud)
+⋮----
+wv_dir = ".weaviate/" + embed_cfg.model_type
+⋮----
+wv_cfg_local = WeaviateDBConfig(
+weaviate_local = WeaviateDB(wv_cfg_local)
+⋮----
+wv_cfg_docker = WeaviateDBConfig(
+weaviate_docker = WeaviateDB(wv_cfg_docker)
+⋮----
+cd_dir = ".chroma/" + embed_cfg.model_type
+⋮----
+cd_cfg = ChromaDBConfig(
+cd = ChromaDB(cd_cfg)
+⋮----
+pg_cfg = PostgresDBConfig(
+pg = PostgresDB(pg_cfg)
+⋮----
+ms_cfg = MeiliSearchConfig(
+ms = MeiliSearch(ms_cfg)
+⋮----
+ldb_dir = ".lancedb/data/" + embed_cfg.model_type
+⋮----
+ldb_cfg = LanceDBConfig(
+⋮----
+# document_class=MyDoc,  # IMPORTANT, to ensure table has full schema!
+⋮----
+ldb = LanceDB(ldb_cfg)
+⋮----
+cfg = PineconeDBConfig(
+pinecone_serverless = PineconeDB(config=cfg)
+⋮----
+# we don't expect some of these to work,
+# e.g. MeiliSearch is a text search engine, not a vector store
+⋮----
+docs_and_scores = vecdb.similar_texts_with_scores(query, k=len(vars(phrases)))
+# first doc should be best match
+# scores are cosine similarities, so high means close
+matching_docs = [doc.content for doc, score in docs_and_scores if score > 0.7]
+⋮----
+def test_vector_stores_access(vecdb)
+⋮----
+# test that we can ingest docs that are created
+# via subclass of Document and  DocMetaData.
+class MyDocMeta(DocMetaData)
+⋮----
+category: str  # an extra field
+⋮----
+class MyDocument(Document)
+⋮----
+metadata: MyDocMeta
+⋮----
+coll_name = vecdb.config.collection_name
+⋮----
+# LanceDB.create_collection() does nothing, since we can't create a table
+# without a schema or data.
+⋮----
+# create random string of 10 arbitrary characters, not necessarily ascii
+⋮----
+# Generate a random string of 10 characters
+ingested_docs = [
+⋮----
+# test get ALL docs
+all_docs = vecdb.get_all_documents()
+ids = [doc.id() for doc in all_docs]
+⋮----
+# test get docs by ids
+docs = vecdb.get_documents_by_ids(ids)
+⋮----
+# test similarity search
+docs_and_scores = vecdb.similar_texts_with_scores("cow", k=1)
+⋮----
+# test collections: create, list, clear
+⋮----
+# pinecone only allows lowercase alphanumeric with "-" characters
+coll_names = [f"test-junk-{i}" for i in range(3)]
+⋮----
+# Weaviate enforces capitalized collection names;
+# verifying adherence.
+⋮----
+coll_names = [f"Test_junk_{i}" for i in range(3)]
+⋮----
+n_colls = len(
+n_dels = vecdb.clear_all_collections(really=True, prefix="Test_junk")
+⋮----
+coll_names = [f"test_junk_{i}" for i in range(3)]
+⋮----
+n_dels = vecdb.clear_all_collections(really=True, prefix="test_junk")
+⋮----
+def test_vector_stores_context_window(vecdb)
+⋮----
+"""Test whether retrieving context-window around matches is working."""
+⋮----
+text = "\n\n".join(vars(phrases).values())
+doc = Document(content=text, metadata=DocMetaData(id="0"))
+cfg = ParsingConfig(
+⋮----
+parser = Parser(cfg)
+splits = parser.split([doc])
+⋮----
+# Test context window retrieval
+docs_scores = vecdb.similar_texts_with_scores("What are Giraffes like?", k=1)
+docs_scores = vecdb.add_context_window(docs_scores, neighbors=2)
+⋮----
+# check they are in the right sequence
+indices = [
+⋮----
+def test_doc_chat_batch_with_vecdb_cloning(vecdb, test_settings)
+⋮----
+"""Ensure DocChatAgent batching works with cloned vector stores."""
+⋮----
+cfg = DocChatAgentConfig(
+⋮----
+agent = DocChatAgent(cfg)
+⋮----
+agent.llm = None  # retrieval-only, avoid external LLM calls
+⋮----
+task = Task(agent, interactive=False, single_round=True)
+⋮----
+queries = ["hello", "hi there", "people living in Canada"]
+⋮----
+results = run_batch_tasks(
+⋮----
+def test_vector_stores_overlapping_matches(vecdb)
+⋮----
+"""Test that overlapping windows are handled correctly."""
+⋮----
+# The windows around the first two giraffe matches should overlap.
+# The third giraffe match should be in a separate window.
+⋮----
+docs_scores = vecdb.similar_texts_with_scores("What are Giraffes like?", k=3)
+# We expect to retrieve a window of -2, +2 around each of the three Giraffe matches.
+# The first two windows will overlap, so they form a connected component,
+# and we topological-sort and order the chunks in these windows, resulting in a
+# single window. The third Giraffe-match context window will not overlap with
+# the other two, so we will have a total of 2 final docs_scores components.
+⋮----
+# verify no overlap in d.metadata.window_ids for d in docs
+all_window_ids = [id for d, _ in docs_scores for id in d.metadata.window_ids]
+⋮----
+# verify giraffe occurs in each /match
+⋮----
+# verify correct sequence of chunks in each match
+sentences = vars(phrases).values()
+⋮----
+content = d.content
+indices = [content.find(p) for p in sentences]
+indices = [i for i in indices if i >= 0]
+⋮----
+def test_lance_metadata()
+⋮----
+"""
+    Test that adding documents with extra fields in metadata
+    (that are absent in the metadata of LanceDBConfig.document_class)
+    works as expected, i.e. the internal schemas and config.document_class
+    are dynamically updated as expected.
+    """
+⋮----
+ldb_dir = ".lancedb/data/test"
+⋮----
+DEFAULT_COLLECTION = "test-dummy"
+ACTUAL_COLLECTION = "test-metadata"
+⋮----
+vecdb = LanceDB(ldb_cfg)
+⋮----
+doc = Document(
+⋮----
+category="other",  # this is an extra field not defined in DocMetaData
+⋮----
+# since we're adding a document whose metadata has an extra field,
+# the config.document_class is updated to reflect the new schema.
+# and the schema is updated to accommodate the extra field,
+⋮----
+# re-init the vecdb like above
+⋮----
+# set to the SAME collection, so we don't create a new one
+⋮----
+# adding a new doc to an existing collection, it has a structure
+# consistent with the previous doc added to this collection,
+# BUT NOT consistent with the DEFAULT_COLLECTION.
+# We want to check that this goes well.
+⋮----
+category="main",  # this is an extra field not defined in DocMetaData
+⋮----
+category="rumor",  # this is an extra field not defined in DocMetaData
+⋮----
+def test_postgres_where_clause(vecdb: PostgresDB)
+⋮----
+"""Test the where clause in get_all_documents,get_similar_texts in PostgresDB"""
+⋮----
+docs = [
+⋮----
+all_docs = vecdb.get_all_documents(where=json.dumps({"category": "other"}))
+⋮----
+all_docs = vecdb.get_all_documents(where=json.dumps({"source": "web"}))
+⋮----
+all_docs = vecdb.get_all_documents(
+⋮----
+all_docs = vecdb.get_all_documents(where=json.dumps({"category": "news"}))
+⋮----
+all_docs = vecdb.get_all_documents(where=json.dumps({"source": "wiki"}))
+</file>
+
+<file path="issues/20260601-qdrant-ci-local-container.md">
+# Qdrant CI tests: use local service container instead of Qdrant Cloud
+
+## Problem
+
+The `Pytest` CI workflow ran the vector-db test suite against **Qdrant Cloud**,
+incurring an ongoing monthly cloud-cluster bill. The cost is driven by the
+running cluster, not by the test collections themselves.
+
+## Root cause
+
+`.github/workflows/pytest.yml` set `QDRANT_API_KEY` / `QDRANT_API_URL` from
+GitHub secrets that point at a real Qdrant Cloud cluster (secrets last updated
+in 2023). Any test using `cloud=True` (the `QdrantDBConfig` default) or
+`docker=True` reads those env vars and connects to that cloud URL.
+
+A local `qdrant/qdrant` service container was added to the workflow in PR #926
+(Oct 2025), but the secrets were never repointed at it — so the container sat
+unused and the cloud-mode tests kept hitting Qdrant Cloud.
+
+## Change
+
+Override the two env vars directly in the workflow so they target the local
+`qdrant` service container instead of the cloud secrets:
+
+```yaml
+QDRANT_API_KEY: local-dev-key
+QDRANT_API_URL: http://localhost:6333
+```
+
+The cloud secrets are intentionally bypassed (left intact but now unreferenced
+by any workflow).
+
+## Effect
+
+All Qdrant tests that run in CI now use local storage:
+
+- `cloud=True` / `docker=True` tests connect to the local service container
+  (`http://localhost:6333`).
+- `cloud=False` tests continue to use embedded local storage.
+- No test connects to Qdrant Cloud anymore.
+
+This works with a single env change because no Qdrant test hardcodes a cloud
+URL, and the only `QDRANT_API_URL` monkeypatch already points at localhost —
+every cloud/server-mode test derives its target solely from `QDRANT_API_URL`.
+
+## Verification
+
+- Audited every `QdrantDBConfig` usage under `tests/` and classified its
+  connection mode (embedded vs local-container vs cloud).
+- Ran a routing proof plus an add / semantic-search / delete cycle against a
+  local `qdrant/qdrant:v1.15.5` container, confirming `cloud=True` resolves to
+  the local container.
+
+## CI fixes uncovered by the migration
+
+The first CI run against the empty, shared container surfaced two issues:
+
+- **`punkt_tab` (pre-existing on `main`):** NLTK 3.9 renamed the `punkt`
+  tokenizer resource to `punkt_tab`, but the workflow's `nltk.download` list
+  only fetched `punkt`. `test_retriever_agent.py` builds an agent and calls
+  `ingest()` at module import, so this raised `LookupError` at collection
+  time. On `main` it was masked by the `continue-on-error` / `--lf` retry
+  logic. Fixed by adding `punkt_tab` to the download list.
+- **Collection-creation race:** `test_retriever_agent.py` created its Qdrant
+  collection at module import with the default `cloud=True`. Under
+  `pytest -n auto`, every xdist worker raced to create the same
+  `test-retriever` collection on the shared container (409 Conflict, then an
+  xdist "different tests collected" abort). Previously hidden because the
+  cloud collection persisted across runs. Fixed by setting `cloud=False` (the
+  `storage_path=":memory:"` already intended embedded, per-worker storage).
+- **Shared-collection race under xdist (PR review P1):** the parametrized
+  `qdrant_cloud` / `qdrant_hybrid_cloud` fixtures in `test_vector_stores.py`
+  and the `qdrant_cloud` case in `test_doc_chat_agent.py` reused a fixed
+  `test-<model>` collection, so parallel workers on the shared container could
+  delete/recreate it mid-test (404/409/empty results). Fixed by suffixing
+  those collection names with the xdist worker id (`PYTEST_XDIST_WORKER`).
+  `test_doc_chat_relevance.py`'s `:memory:` config was switched to
+  `cloud=False` (embedded) for the same reason.
+
+## Follow-up (not part of this change)
+
+To actually stop the cloud bill, delete or suspend the Qdrant Cloud cluster
+(and clear any retained backups) in the Qdrant Cloud console — deleting
+collections alone does not stop the hourly cluster charge.
+</file>
+
+<file path="langroid/agent/special/sql/sql_chat_agent.py">
+"""
+Agent that allows interaction with an SQL database using SQLAlchemy library.
+The agent can execute SQL queries in the database and return the result.
+
+Functionality includes:
+- adding table and column context
+- asking a question about a SQL schema
+"""
+⋮----
+# sqlglot is required for the statement-type allowlist enforced in
+# `_validate_query`. Importing it at module load ensures the security
+# guarantee cannot be silently bypassed by a partial/stale install.
+⋮----
+logger = logging.getLogger(__name__)
+⋮----
+console = Console()
+⋮----
+DEFAULT_SQL_CHAT_SYSTEM_MESSAGE = """
+⋮----
+ADDRESSING_INSTRUCTION = """
+⋮----
+DONE_INSTRUCTION = f"""
+⋮----
+SQL_ERROR_MSG = "There was an error in your SQL Query"
+⋮----
+# Dialect-specific SQL patterns that enable code execution, arbitrary file
+# access, or other escapes from the database engine. Matched against the raw
+# query text (case-insensitive) as a defense-in-depth layer in addition to the
+# sqlglot-based statement-type allowlist.
+_DANGEROUS_SQL_PATTERNS: List["re.Pattern[str]"] = [
+⋮----
+# PostgreSQL: COPY ... FROM/TO PROGRAM executes shell commands as the DB
+# server OS user.
+⋮----
+# PostgreSQL server-side filesystem / log / WAL access. Match the whole
+# pg_read*, pg_stat*, pg_ls*, pg_current_logfile family rather than naming
+# individual functions: near-name functions (pg_read_file vs
+# pg_read_server_file, pg_ls_logdir vs pg_ls_dir, pg_stat_file, ...) all
+# yield the same file/metadata disclosure primitive.
+⋮----
+# MySQL/MariaDB filesystem
+⋮----
+# SQLite: load_extension enables loading arbitrary shared objects;
+# ATTACH can read/write arbitrary files. The DATABASE keyword is optional
+# per the SQLite grammar (ATTACH [DATABASE] expr AS schema-name), so match
+# both forms.
+⋮----
+# SQL Server: command execution, OLE automation, and ad-hoc external data
+# sources (OPENDATASOURCE is the connection-string counterpart of
+# OPENROWSET; both can read remote/UNC files).
+⋮----
+# Generic: stored-program creation and procedural language extensions.
+# LANGUAGE / RULE / EVENT TRIGGER / FOREIGN TABLE are additional PostgreSQL
+# primitives that can register attacker-controlled code.
+⋮----
+# Default set of SQL statement types the agent is allowed to execute when
+# `allow_dangerous_operations` is False. SELECT-only is safe for Q&A workloads.
+_DEFAULT_ALLOWED_STATEMENTS: List[str] = ["SELECT"]
+⋮----
+class SQLChatAgentConfig(ChatAgentConfig)
+⋮----
+system_message: str = DEFAULT_SQL_CHAT_SYSTEM_MESSAGE
+user_message: None | str = None
+cache: bool = True  # cache results
+debug: bool = False
+use_helper: bool = True
+is_helper: bool = False
+stream: bool = True  # allow streaming where needed
+database_uri: str = ""  # Database URI
+database_session: None | Session = None  # Database session
+vecdb: None | VectorStoreConfig = None
+context_descriptions: Dict[str, Dict[str, Union[str, Dict[str, str]]]] = {}
+use_schema_tools: bool = False
+multi_schema: bool = False
+# whether the agent is used in a continuous chat with user,
+# as opposed to returning a result from the task.run()
+chat_mode: bool = False
+addressing_prefix: str = ""
+max_result_rows: int | None = None  # limit query results to this
+max_retained_tokens: int | None = None  # limit history of query results to this
+⋮----
+# --- Security controls (see CVE-2026-25879) ---------------------------
+# By default, the agent only executes SELECT statements and rejects any
+# query that matches a known dangerous pattern (e.g. PostgreSQL
+# `COPY ... FROM PROGRAM`, MySQL `INTO OUTFILE`, SQLite `load_extension`,
+# MSSQL `xp_cmdshell`). The LLM-generated SQL is influenceable by prompt
+# injection — including injection via data the LLM reads back from the
+# database — so executing it without restrictions is unsafe when the DB
+# role has elevated privileges.
+#
+# To enable writes: extend allowed_statement_types, e.g. ["SELECT",
+# "INSERT", "UPDATE", "DELETE"]. To disable all checks (only do this with
+# a least-privilege DB role and trusted prompts): set
+# allow_dangerous_operations=True.
+allowed_statement_types: List[str] = list(_DEFAULT_ALLOWED_STATEMENTS)
+allow_dangerous_operations: bool = False
+⋮----
+"""
+    Optional, but strongly recommended, context descriptions for tables, columns, 
+    and relationships. It should be a dictionary where each key is a table name 
+    and its value is another dictionary. 
+
+    In this inner dictionary:
+    - The 'description' key corresponds to a string description of the table.
+    - The 'columns' key corresponds to another dictionary where each key is a 
+    column name and its value is a string description of that column.
+    - The 'relationships' key corresponds to another dictionary where each key 
+    is another table name and the value is a description of the relationship to 
+    that table.
+
+    If multi_schema support is enabled, the tables names in the description
+    should be of the form 'schema_name.table_name'.
+
+    For example:
+    {
+        'table1': {
+            'description': 'description of table1',
+            'columns': {
+                'column1': 'description of column1 in table1',
+                'column2': 'description of column2 in table1'
+            }
+        },
+        'table2': {
+            'description': 'description of table2',
+            'columns': {
+                'column3': 'description of column3 in table2',
+                'column4': 'description of column4 in table2'
+            }
+        }
+    }
+    """
+⋮----
+class SQLChatAgent(ChatAgent)
+⋮----
+"""
+    Agent for chatting with a SQL database
+    """
+⋮----
+used_run_query: bool = False
+llm_responded: bool = False
+⋮----
+def __init__(self, config: "SQLChatAgentConfig") -> None
+⋮----
+"""Initialize the SQLChatAgent.
+
+        Raises:
+            ValueError: If database information is not provided in the config.
+        """
+⋮----
+# Caution - this updates the self.config.system_message!
+⋮----
+# helper_config.system_message is now the fully-populated sys msg of
+# the main SQLAgent.
+⋮----
+def _validate_config(self, config: "SQLChatAgentConfig") -> None
+⋮----
+"""Validate the configuration to ensure all necessary fields are present."""
+⋮----
+def _init_database(self) -> None
+⋮----
+"""Initialize the database engine and session."""
+⋮----
+def _init_metadata(self) -> None
+⋮----
+"""Initialize the database metadata."""
+⋮----
+inspector = inspect(self.engine)
+⋮----
+metadata = MetaData(schema=schema)
+⋮----
+def _init_table_metadata(self) -> None
+⋮----
+"""Initialize metadata for the tables present in the database."""
+⋮----
+def _init_system_message(self) -> None
+⋮----
+"""Initialize the system message."""
+message = self._format_message()
+⋮----
+allowed = sorted(
+⋮----
+def _init_tools(self) -> None
+⋮----
+"""Initialize sys msg and tools."""
+# Create a custom RunQueryTool class with the desired max_retained_tokens
+⋮----
+class CustomRunQueryTool(RunQueryTool)
+⋮----
+_max_retained_tokens = self.config.max_retained_tokens
+⋮----
+def _format_message(self) -> str
+⋮----
+"""Format the system message based on the engine and table metadata."""
+⋮----
+def _enable_schema_tools(self) -> None
+⋮----
+"""Enable tools for schema-related functionalities."""
+⋮----
+def _clarify_answer_instruction(self) -> str
+⋮----
+"""
+        Prompt to use when asking LLM to clarify intent of
+        an already-generated response
+        """
+⋮----
+def _clarifying_message(self) -> str
+⋮----
+tools_instruction = f"""
+⋮----
+"""
+        We'd end up here if the current msg has no tool.
+        If this is from LLM, we may need to handle the scenario where
+        it may have "forgotten" to generate a tool.
+        """
+⋮----
+# send any Non-tool msg to the user
+⋮----
+# Agent intent not clear => use the helper agent to
+# do what this agent should have done, e.g. generate tool, etc.
+# This is likelier to succeed since this agent has no "baggage" of
+# prior conversation, other than the system msg, and special
+# "Intent-interpretation" instructions.
+⋮----
+AnyTool = self._get_any_tool_message(optional=False)
+⋮----
+recovery_message = self._strict_recovery_instructions(
+result = self.llm_response(recovery_message)
+# remove the recovery_message (it has User role) from the chat history,
+# else it may cause the LLM to directly use the AnyTool.
+self.delete_last_message(role=Role.USER)  # delete last User-role msg
+⋮----
+response = self.helper_agent.llm_response(message)
+tools = self.try_get_tool_messages(response)
+⋮----
+# fall back on the clarification message
+⋮----
+def retry_query(self, e: Exception, query: str) -> str
+⋮----
+"""
+        Generate an error message for a failed SQL query and return it.
+
+        Parameters:
+        e (Exception): The exception raised during the SQL query execution.
+        query (str): The SQL query that failed.
+
+        Returns:
+        str: The error message.
+        """
+⋮----
+# Optional part to be included based on `use_schema_tools`
+optional_schema_description = ""
+⋮----
+optional_schema_description = f"""\
+⋮----
+# Construct the error message
+error_message_template = f"""\
+⋮----
+def _available_tool_names(self) -> str
+⋮----
+def _tool_result_llm_answer_prompt(self) -> str
+⋮----
+"""
+        Prompt to use at end of tool result,
+        to guide LLM, for the case where it wants to answer the user's query
+        """
+⋮----
+def _sqlglot_dialect(self) -> Optional[str]
+⋮----
+"""Map the SQLAlchemy dialect name to a sqlglot dialect name."""
+⋮----
+name: str = str(self.engine.dialect.name)
+# sqlglot uses 'postgres', not 'postgresql'; 'tsql' for MSSQL.
+mapping: Dict[str, str] = {"postgresql": "postgres", "mssql": "tsql"}
+⋮----
+def _validate_query(self, query: str) -> Optional[str]
+⋮----
+"""
+        Check whether `query` is permitted under the agent's security config.
+
+        Returns None if the query may be executed, otherwise an error message
+        explaining why it was rejected (to be relayed to the LLM).
+        """
+⋮----
+allowed = {t.strip().upper() for t in self.config.allowed_statement_types}
+⋮----
+statements = sqlglot.parse(query, read=self._sqlglot_dialect())
+⋮----
+kind_map = {
+⋮----
+kind = next(
+⋮----
+def run_query(self, msg: RunQueryTool) -> str
+⋮----
+"""
+        Handle a RunQueryTool message by executing a SQL query and returning the result.
+
+        Args:
+            msg (RunQueryTool): The tool-message to handle.
+
+        Returns:
+            str: The result of executing the SQL query.
+        """
+query = msg.query
+session = self.Session
+⋮----
+rejection = self._validate_query(query)
+⋮----
+query_result = session.execute(text(query))
+⋮----
+# attempt to fetch results: should work for normal SELECT queries
+rows = query_result.fetchall()
+n_rows = len(rows)
+⋮----
+rows = rows[: self.config.max_result_rows]
+⋮----
+response_message = self._format_rows(rows)
+⋮----
+# If we get here, it's a non-SELECT query (UPDATE, INSERT, DELETE)
+affected_rows = query_result.rowcount  # type: ignore
+response_message = f"""
+⋮----
+response_message = self.retry_query(e, query)
+⋮----
+final_message = f"""
+⋮----
+def _format_rows(self, rows: Sequence[Row[Any]]) -> str
+⋮----
+"""
+        Format the rows fetched from the query result into a string.
+
+        Args:
+            rows (list): List of rows fetched from the query result.
+
+        Returns:
+            str: Formatted string representation of rows.
+        """
+# TODO: UPDATE FORMATTING
+⋮----
+def get_table_names(self, msg: GetTableNamesTool) -> str
+⋮----
+"""
+        Handle a GetTableNamesTool message by returning the names of all tables in the
+        database.
+
+        Returns:
+            str: The names of all tables in the database.
+        """
+⋮----
+table_names = [", ".join(md.tables.keys()) for md in self.metadata]
+⋮----
+def get_table_schema(self, msg: GetTableSchemaTool) -> str
+⋮----
+"""
+        Handle a GetTableSchemaTool message by returning the schema of all provided
+        tables in the database.
+
+        Returns:
+            str: The schema of all provided tables in the database.
+        """
+tables = msg.tables
+result = ""
+⋮----
+table = self.table_metadata.get(table_name)
+⋮----
+def get_column_descriptions(self, msg: GetColumnDescriptionsTool) -> str
+⋮----
+"""
+        Handle a GetColumnDescriptionsTool message by returning the descriptions of all
+        provided columns from the database.
+
+        Returns:
+            str: The descriptions of all provided columns from the database.
+        """
+table = msg.table
+columns = msg.columns.split(", ")
+result = f"\nTABLE: {table}"
+descriptions = self.config.context_descriptions.get(table)
+⋮----
+result += f"\n{col} => {descriptions['columns'][col]}"  # type: ignore
+⋮----
+class SQLHelperAgent(SQLChatAgent)
+⋮----
+"""Set up helper sys msg"""
+⋮----
+# Note that self.config.system_message is already set to the
+# parent SQLAgent's system_message
+⋮----
+# note that the initial msg in chat history will contain:
+# - system message
+# - tool instructions
+# so the final_instructions will be at the end of this initial msg
+⋮----
+message_str = message if isinstance(message, str) else message.content
+instruc_msg = f"""
+# user response_forget to avoid accumulating the chat history
+</file>
+
 <file path="langroid/agent/chat_document.py">
 class ChatDocAttachment(BaseModel)
 ⋮----
@@ -64856,6 +65257,644 @@ matched = False
 matched = True
 </file>
 
+<file path="tests/main/test_mcp_tools.py">
+# note we use pydantic v2 to define MCP server
+from pydantic import BaseModel, Field  # keep - need pydantic v2 for MCP server
+⋮----
+async def check_npx_package_availability(package: str, timeout: float = 10.0) -> bool
+⋮----
+"""
+    Check if an npx package is available without actually starting the MCP server.
+    This helps avoid ProcessLookupError by detecting package issues early.
+
+    Args:
+        package: The npm package name to check
+        timeout: Timeout for the check operation
+
+    Returns:
+        True if package appears to be available, False otherwise
+    """
+⋮----
+# Try to check if the package exists using npm info
+result = await asyncio.wait_for(
+⋮----
+# If npm info succeeds, the package exists
+⋮----
+# Check for specific "not found" errors in stderr
+stderr_text = stderr.decode() if stderr else ""
+⋮----
+# For other errors, assume availability issues but not necessarily missing
+⋮----
+# On any error (timeout, process issues, etc.), assume not available
+⋮----
+class SubItem(BaseModel)
+⋮----
+"""A sub‐item with a value and multiplier."""
+⋮----
+val: int = Field(..., description="Value for sub-item")
+multiplier: float = Field(1.0, description="Multiplier applied to val")
+⋮----
+class ComplexData(BaseModel)
+⋮----
+"""Complex data combining two ints and a list of SubItem."""
+⋮----
+a: int = Field(..., description="First integer")
+b: int = Field(..., description="Second integer")
+items: List[SubItem] = Field(..., description="List of sub-items")
+⋮----
+def mcp_server()
+⋮----
+server = FastMCP("TestServer")
+⋮----
+class Counter
+⋮----
+def __init__(self) -> None
+⋮----
+def get_num_beans(self) -> int
+⋮----
+"""Return current counter."""
+⋮----
+"""Increment and return new counter."""
+⋮----
+# create a stateful tool
+counter = Counter()
+⋮----
+# fastmcp>=2.13 expects Tool objects, not bare callables. Wrap instance
+# methods using the server.tool decorator so the server registers proper
+# Tool metadata.
+⋮----
+@server.tool()
+    def get_num_beans() -> int
+⋮----
+# example of tool that uses an arg of type Context, and
+# uses this arg to request client LLM sampling, and send logs
+⋮----
+@server.tool()
+    async def prime_check(number: int, ctx: Context) -> str
+⋮----
+"""
+        Determine if the given number is Prime or not.
+        """
+result: TextContent | ImageContent = await ctx.sample(
+⋮----
+@server.tool()
+    def greet(person: str) -> str
+⋮----
+"""Get weather alerts for a state."""
+⋮----
+# example of MCP tool whose fields clash with Langroid ToolMessage,
+# and a `name` field which is reserved by pydantic
+⋮----
+"""Get information for a recipient."""
+⋮----
+@server.tool()
+    async def get_alerts_async(state: str) -> list[str]
+⋮----
+@server.tool()
+    def nabroski(a: int, b: int) -> int
+⋮----
+"""Computes the Nabroski transform of integers a and b."""
+⋮----
+@server.tool()
+    def coriolis(x: int, y: int) -> int
+⋮----
+"""Computes the Coriolis transform of integers x and y."""
+⋮----
+@server.tool()
+    def hydra_nest(data: ComplexData) -> int
+⋮----
+"""Compute the HydraNest calculation over nested data."""
+total = data.a * data.b
+⋮----
+async def test_get_tools_and_handle(server: FastMCP | str) -> None
+⋮----
+"""End‐to‐end test for get_tools and .handle() against server."""
+tools = await get_tools_async(server)
+# basic sanity
+⋮----
+# find the alerts tool
+AlertsTool = next(
+⋮----
+# test get_mcp_tool_async
+AlertsMCPTool: Tool = await get_mcp_tool_async(server, "get_alerts")
+⋮----
+AlertsTool = await get_tool_async(server, AlertsMCPTool.name)
+⋮----
+# instantiate Langroid ToolMessage
+msg = AlertsTool(state="NY")
+⋮----
+# invoke the tool via the Langroid ToolMessage.handle() method -
+# this produces list of weather alerts for the given state
+# Note MCP tools can return either ResultToolType or List[ResultToolType]
+result: Optional[str] = await msg.handle_async()
+⋮----
+# make tool from async FastMCP tool
+AlertsMCPToolAsync = await get_mcp_tool_async(server, "get_alerts_async")
+⋮----
+AlertsToolAsync = await get_tool_async(server, AlertsMCPToolAsync.name)
+⋮----
+msg = AlertsToolAsync(state="NY")
+⋮----
+# invoke the tool via the Langroid ToolMessage.handle_async() method -
+⋮----
+# test making tool with utility functions
+AlertsTool = await get_tool_async(server, "get_alerts")
+⋮----
+@pytest.mark.asyncio
+async def test_tools_connect_close(server: str | FastMCP) -> None
+⋮----
+"""Test that we can use connect()... tool-calls ... close()"""
+⋮----
+client = FastMCPClient(server)
+⋮----
+mcp_tools = await client.client.list_tools()
+⋮----
+langroid_tool_classes = await client.get_tools_async()
+⋮----
+AlertsMCPTool = await get_mcp_tool_async(server, "get_alerts")
+⋮----
+result = await msg.handle_async()
+⋮----
+@pytest.mark.asyncio
+async def test_stateful_tool() -> None
+⋮----
+# instantiate the server
+server = mcp_server()
+⋮----
+# get tools from the SAME instance of the server
+AddBeansTool = await get_tool_async(server, "add_beans")
+⋮----
+GetNumBeansTool = await get_tool_async(server, "get_num_beans")
+⋮----
+add_beans_msg = AddBeansTool(x=5)
+⋮----
+result = await add_beans_msg.handle_async()
+⋮----
+get_num_beans_msg = GetNumBeansTool()
+⋮----
+result = await get_num_beans_msg.handle_async()
+⋮----
+@pytest.mark.asyncio
+async def test_tool_with_context_and_sampling() -> None
+⋮----
+"""Handle a sampling request from server"""
+# simulate an LLM call
+⋮----
+PrimeCheckTool = await get_tool_async(
+⋮----
+# assert that "ctx" is NOT a field in the tool
+⋮----
+prime_check_msg = PrimeCheckTool(number=7)
+⋮----
+result = await prime_check_msg.handle_async()
+⋮----
+@pytest.mark.asyncio
+async def test_mcp_tool_schemas() -> None
+⋮----
+"""
+    Test that descriptions, field-descriptions of MCP tools are preserved
+    when we translate them to Langroid ToolMessage classes. This is important
+    since the LLM is shown these, and helps with tool-call accuracy.
+    """
+# make a langroid AlertsTool from the corresponding MCP tool
+AlertsTool = await get_tool_async(mcp_server(), "get_alerts")
+⋮----
+description = "Get weather alerts for a state."
+⋮----
+schema: lm.LLMFunctionSpec = AlertsTool.llm_function_schema()
+⋮----
+InfoTool = await get_tool_async(mcp_server(), "info_tool")
+⋮----
+description = "Get information for a recipient."
+⋮----
+# instantiate InfoTool
+msg = InfoTool(
+⋮----
+# call the tool
+⋮----
+@pytest.mark.asyncio
+async def test_single_output() -> None
+⋮----
+"""Test that a tool with a single string output works
+    similarly to one that has a list of strings outputs."""
+⋮----
+OneAlertTool = await get_tool_async(mcp_server(), "get_one_alert")
+⋮----
+msg = OneAlertTool(state="NY")
+⋮----
+# we expect a list containing a single str
+⋮----
+@pytest.mark.asyncio
+async def test_agent_mcp_tools() -> None
+⋮----
+"""Test that a Langroid ChatAgent can use and handle MCP tools."""
+⋮----
+agent = lr.ChatAgent(
+⋮----
+NabroskiTool: lr.ToolMessage = await get_tool_async(server, "nabroski")
+⋮----
+response: lr.ChatDocument = await agent.llm_response_async(
+tools = agent.get_tool_messages(response)
+⋮----
+result: lr.ChatDocument = await agent.agent_response_async(response)
+# TODO assert needs to take LLM tool-forgetting into account
+⋮----
+task = lr.Task(agent, interactive=False)
+result: lr.ChatDocument = await task.run_async(
+⋮----
+# test MCP tool with fields that clash with Langroid ToolMessage
+InfoTool = await get_tool_async(server, "info_tool")
+⋮----
+# Need to define the tools outside async def,
+# since the decorator uses asyncio.run() to wrap around an async fn
+⋮----
+@mcp_tool(mcp_server(), "get_alerts")
+class GetAlertsTool(lr.ToolMessage)
+⋮----
+"""Tool to get weather alerts."""
+⋮----
+async def my_handler(self) -> str
+⋮----
+alert = await self.handle_async()
+⋮----
+@mcp_tool(mcp_server(), "nabroski")
+class NabroskiTool(lr.ToolMessage)
+⋮----
+"""Tool to get Nabroski transform."""
+⋮----
+result = await self.handle_async()
+⋮----
+@pytest.mark.asyncio
+async def test_fastmcp_decorator() -> None
+⋮----
+"""Test that the mcp_tool decorator works as expected."""
+⋮----
+msg = GetAlertsTool(state="NY")
+⋮----
+result = await msg.my_handler()
+⋮----
+result = await task.run_async("What is the nabroski transform of 5 and 3?", turns=3)
+⋮----
+@mcp_tool(mcp_server(), "hydra_nest")
+class HydraNestTool(lr.ToolMessage)
+⋮----
+"""Tool for computing HydraNest calculation."""
+⋮----
+"""Call hydra_nest and format result."""
+⋮----
+@pytest.mark.asyncio
+async def test_complex_tool_decorator() -> None
+⋮----
+"""Test that compute_complex via decorator works end‐to‐end."""
+# build nested input
+payload = {
+msg = HydraNestTool(**payload)
+⋮----
+# call handler
+⋮----
+expected = int(4 * 5 + 2 * 1.5 + 3 * 2.0)
+⋮----
+# round‐trip via an agent
+⋮----
+prompt = """
+response = await task.run_async(prompt, turns=2)
+⋮----
+@pytest.mark.asyncio
+async def test_multiple_tools(prompt, tool_name, expected) -> None
+⋮----
+"""
+    Test one-shot enabling of multiple tools.
+    """
+⋮----
+all_tools = await get_tools_async(mcp_server())
+⋮----
+tool = next(
+⋮----
+# test that agent (LLM) can pick right tool based on prompt
+prompt = "use one of your TOOLs to answer this: " + prompt
+response: lr.ChatDocument = await agent.llm_response_async(prompt)
+⋮----
+# test in a task
+⋮----
+result: lr.ChatDocument = await task.run_async(prompt, turns=3)
+⋮----
+@pytest.mark.asyncio
+async def test_npxstdio_transport() -> None
+⋮----
+"""
+    Test that we can create Langroid ToolMessage from an MCP server
+    via npx stdio transport, for example the `exa-mcp-server`:
+    https://github.com/exa-labs/exa-mcp-server
+    """
+# Pin to 0.2.12 because 0.2.14+ depends on @modelcontextprotocol/sdk@1.25.2
+# which doesn't exist on npm (as of Jan 2026)
+package_name = "tavily-mcp@0.2.12"
+⋮----
+# Pre-check package availability to provide better error messages
+⋮----
+transport = NpxStdioTransport(
+# Add timeout to prevent hanging during npx package download/initialization
+⋮----
+tools = await asyncio.wait_for(get_tools_async(transport), timeout=60.0)
+⋮----
+# Catch other potential MCP/subprocess errors in CI environments
+⋮----
+# Re-raise if it's not a known npx/subprocess issue
+⋮----
+WebSearchTool = await get_tool_async(transport, "tavily-search")
+⋮----
+# Note: we shouldn't have to explicitly beg the LLM to use the tool here
+# but I've found that even GPT-4o sometimes fails to use the tool
+question = f"""
+⋮----
+result: lr.ChatDocument = await task.run_async(question, turns=10)
+⋮----
+@pytest.mark.asyncio
+async def test_uvxstdio_transport() -> None
+⋮----
+"""
+    Test that we can create Langroid ToolMessage from an MCP server
+    via uvx stdio transport. We use this example `git` MCP server:
+    https://github.com/modelcontextprotocol/servers/tree/main/src/git
+    """
+transport = UvxStdioTransport(
+⋮----
+# `tool_name` is a misleading name -- it really refers to the
+# MCP server, which offers several tools
+⋮----
+# Add timeout and robust skipping similar to npx test
+⋮----
+GitStatusTool = await get_tool_async(transport, "git_status")
+⋮----
+prompt = f"""
+⋮----
+response = await agent.llm_response_async(prompt)
+⋮----
+result: lr.ChatDocument = await task.run_async(prompt, turns=10)
+⋮----
+@pytest.mark.xfail(reason="External MCP server returns inconsistent responses")
+@pytest.mark.asyncio
+async def test_npxstdio_transport_memory() -> None
+⋮----
+"""
+    Test that we can create Langroid ToolMessage from the `memory` MCP server
+    via npx stdio transport:
+    https://github.com/modelcontextprotocol/servers/tree/main/src/memory
+    """
+package_name = "@modelcontextprotocol/server-memory"
+⋮----
+# Run the task just so LLM emits any necessary tool calls to store info,
+# and the handlers execute them
+task = lr.Task(agent, interactive=False, restart=False)
+⋮----
+# now run the same task to retrieve info using search_nodes tool
+⋮----
+result: lr.ChatDocument = await task.run_async(prompt, turns=6)
+⋮----
+@pytest.mark.asyncio
+async def test_persist_connection() -> None
+⋮----
+"""Test that persist_connection keeps the connection open between tool calls."""
+⋮----
+# Create client with persist_connection=True
+⋮----
+# First tool call - this should create and keep the connection open
+tool1 = await client.get_tool_async("add_beans")
+⋮----
+# Check that client connection is established
+⋮----
+initial_client = client.client
+⋮----
+# Second tool call - should reuse the same connection
+tool2 = await client.get_tool_async("get_num_beans")
+⋮----
+# Verify the same client connection was reused
+⋮----
+# Call the tools to ensure they work
+add_msg = tool1(x=5)
+result1 = await add_msg.handle_async()
+assert result1 == "5"  # handle_async returns string for backward compatibility
+⋮----
+get_msg = tool2()
+result2 = await get_msg.handle_async()
+assert result2 == "5"  # handle_async returns string for backward compatibility
+⋮----
+@pytest.mark.asyncio
+async def test_handle_async_with_images() -> None
+⋮----
+"""Test that response_async returns ChatDocument with file attachments."""
+# Create a mock server that returns image content
+server = FastMCP("ImageServer")
+⋮----
+@server.tool()
+    async def get_chart() -> List[TextContent | ImageContent]
+⋮----
+"""Get a chart with image."""
+⋮----
+data="iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==",  # noqa: E501
+⋮----
+# Get the tool and test response_async
+⋮----
+ChartTool = await client.get_tool_async("get_chart")
+⋮----
+# Create a mock agent
+agent = lr.ChatAgent(lr.ChatAgentConfig())
+⋮----
+# Test response_async method
+chart_msg = ChartTool()
+response = await chart_msg.handle_async(agent)
+⋮----
+# Verify we got a ChatDocument
+⋮----
+# Verify we have file attachments in the files attribute
+⋮----
+# Verify the file is an image
+file = response.files[0]
+⋮----
+@pytest.mark.asyncio
+async def test_forward_text_resources() -> None
+⋮----
+"""Test that forward_text_resources setting works correctly."""
+⋮----
+server = FastMCP("TextResourceServer")
+⋮----
+# Test the _convert_tool_result method directly with mocked data
+⋮----
+# Create a mock CallToolResult with text and text resource
+mock_result = CallToolResult(
+⋮----
+# Test with forward_text_resources=True
+result = client._convert_tool_result("test_tool", mock_result)
+⋮----
+# Should include both the main text and the resource text
+⋮----
+# Test with forward_text_resources=False
+⋮----
+# Should only include the main text, not the resource text
+⋮----
+@pytest.mark.asyncio
+async def test_forward_blob_resources() -> None
+⋮----
+"""Test that forward_blob_resources setting works correctly."""
+⋮----
+server = FastMCP("BlobResourceServer")
+⋮----
+# Small PNG data (1x1 blue pixel)
+png_data = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAAD0lEQVR42mNkYPhfz/ADAAKAA4RkT4UVAAAAAElFTkSuQmCC"  # noqa: E501
+⋮----
+# Create a mock CallToolResult with text and blob resource
+⋮----
+# Test with forward_blob_resources=True
+⋮----
+# Should have text content and file attachment
+⋮----
+# Test with forward_blob_resources=False
+⋮----
+# Should only have text content, no file attachments
+⋮----
+@pytest.mark.asyncio
+async def test_stdio_example_like_decorator_clone(tmp_path) -> None
+⋮----
+"""Decorator-style example that should pass with Stdio cloning and fail if reused.
+
+    This mirrors the structure of the example script in
+    examples/mcp/claude-code-mcp-single.py:
+    we create a single StdioTransport and pass it to
+    @mcp_tool at "import time" (inside the test).
+    We then explicitly stop the underlying transport after the decorator-time
+    schema fetch to simulate servers that exit after the first session. With the
+    current clone policy for plain Stdio, the subsequent runtime call uses a
+    fresh transport and succeeds. If you revert the client to reuse Stdio
+    transports globally (pre-fix), this test reproduces the same failure the
+    example showed (initialize → "session was closed unexpectedly").
+    """
+⋮----
+# Minimal stdio MCP server with a single ping tool
+server_code = (
+script = tmp_path / "ping_server.py"
+⋮----
+transport = StdioTransport(command="python", args=[str(script)])
+⋮----
+# Decorator-time: build ToolMessage class from the single StdioTransport.
+# We are inside an async test (running event loop), so using the decorator
+# (which sync-calls asyncio.run) would trigger a loop error. Instead, we
+# call get_tool_async directly to mirror the decorator’s effect.
+PingBase = await get_tool_async(transport, "ping")
+⋮----
+class PingTool(PingBase):  # type: ignore
+⋮----
+# Simulate servers that exit after first session by explicitly stopping
+# the underlying transport after the decorator-time schema fetch
+⋮----
+transport._stop_event.set()  # type: ignore[attr-defined]
+⋮----
+# Runtime: under the clone policy, this uses a fresh StdioTransport and works.
+# If the client is reverted to reuse StdioTransport globally, this will fail
+# with the same "session was closed unexpectedly" seen in the example.
+msg = PingTool()
+⋮----
+@pytest.mark.asyncio
+async def test_as_server_factory_reuse_policy_split() -> None
+⋮----
+"""Verify that Langroid reuses Npx transport instances but clones plain stdio.
+
+    This guards against regressions where reusing a generic StdioTransport across
+    decorator-time and runtime caused reconnect failures for some CLI servers,
+    while ensuring we still reuse NpxStdioTransport to keep stateful servers alive.
+    """
+⋮----
+# Plain StdioTransport should be CLONED (two calls produce different objects)
+stdio = StdioTransport(command="python", args=["-c", "print('ok')"])
+stdio_factory: Callable[[], object] = FastMCPClient._as_server_factory(stdio)
+a = stdio_factory()
+b = stdio_factory()
+⋮----
+# NpxStdioTransport should be REUSED (same object instance)
+npx = NpxStdioTransport(package="dummy-pkg")
+npx_factory: Callable[[], object] = FastMCPClient._as_server_factory(npx)
+x = npx_factory()
+y = npx_factory()
+⋮----
+@pytest.mark.asyncio
+async def test_optional_fields() -> None
+⋮----
+"""Test MCP tools with optional fields can be instantiated with only
+    required fields.
+
+    This is the REAL bug: when an MCP tool has optional fields
+    (not in "required" array, no defaults), we should be able to create
+    an instance with ONLY the required fields.
+    Without the fix, this raises ValidationError.
+    """
+⋮----
+# Create a real MCP server
+⋮----
+# Create a Tool with the problematic schema
+# (optional fields WITHOUT defaults in the schema)
+problematic_tool = Tool(
+⋮----
+# ONLY pattern is required - others have NO defaults
+⋮----
+# Convert this to a Langroid ToolMessage
+⋮----
+# Replace the get_mcp_tool_async to return our problematic tool
+async def get_problematic_tool(name: str)
+⋮----
+SearchTool = await client.get_tool_async("grep_like_tool")
+⋮----
+# CRITICAL TEST: Can we instantiate with ONLY the required field?
+# WITHOUT the fix, this raises:
+#   ValidationError: 4 validation errors for tool
+#   path: Input should be a valid string
+#   case_insensitive: Input should be a valid boolean
+#   max_results: Input should be a valid integer
+# WITH the fix, this works because optional fields are
+#   Optional[type] = None
+msg = SearchTool(pattern="test")
+⋮----
+@pytest.mark.asyncio
+async def test_optional_fields_exclude_none_in_payload() -> None
+⋮----
+"""Test that optional fields with None values are excluded from MCP payload.
+
+    When LLM provides only required fields, optional fields are None.
+    These None values must NOT be sent to the MCP server - they should be excluded.
+    Without exclude_none=True, the MCP server receives None values and may fail.
+    """
+⋮----
+# Create Tool with optional fields
+tool_def = Tool(
+⋮----
+# Create client with persist_connection=True to keep same client instance
+captured_payload = {}
+⋮----
+# Mock the session.call_tool to capture what payload is sent
+async def mock_call_tool(tool_name: str, arguments: dict)
+⋮----
+captured_payload = arguments
+# Return a valid result
+⋮----
+# Get the tool
+async def get_tool(name: str)
+⋮----
+GrepTool = await client.get_tool_async("grep_tool")
+⋮----
+# Instantiate with only required field
+msg = GrepTool(pattern="test")
+⋮----
+# Call the tool - this will send payload to MCP server
+⋮----
+# CRITICAL TEST: Payload should NOT contain None values
+# WITHOUT exclude_none=True:
+#   payload = {"pattern": "test", "path": None,
+#              "case_insensitive": None}
+# WITH exclude_none=True:
+#   payload = {"pattern": "test"}
+⋮----
+assert "path" not in captured_payload  # Should be excluded because it's None
+assert "case_insensitive" not in captured_payload  # Should be excluded
+</file>
+
 <file path="tests/main/test_prep_llm_message.py">
 CHAT_CONTEXT_LENGTH = 16_000
 MAX_OUTPUT_TOKENS = 1000
@@ -65531,644 +66570,6 @@ model_config = SettingsConfigDict(env_prefix="")
 llm_config = CustomOpenAIGPTConfig(
 ⋮----
 response = llm.chat("What is 3+4?")
-</file>
-
-<file path="tests/main/test_mcp_tools.py">
-# note we use pydantic v2 to define MCP server
-from pydantic import BaseModel, Field  # keep - need pydantic v2 for MCP server
-⋮----
-async def check_npx_package_availability(package: str, timeout: float = 10.0) -> bool
-⋮----
-"""
-    Check if an npx package is available without actually starting the MCP server.
-    This helps avoid ProcessLookupError by detecting package issues early.
-
-    Args:
-        package: The npm package name to check
-        timeout: Timeout for the check operation
-
-    Returns:
-        True if package appears to be available, False otherwise
-    """
-⋮----
-# Try to check if the package exists using npm info
-result = await asyncio.wait_for(
-⋮----
-# If npm info succeeds, the package exists
-⋮----
-# Check for specific "not found" errors in stderr
-stderr_text = stderr.decode() if stderr else ""
-⋮----
-# For other errors, assume availability issues but not necessarily missing
-⋮----
-# On any error (timeout, process issues, etc.), assume not available
-⋮----
-class SubItem(BaseModel)
-⋮----
-"""A sub‐item with a value and multiplier."""
-⋮----
-val: int = Field(..., description="Value for sub-item")
-multiplier: float = Field(1.0, description="Multiplier applied to val")
-⋮----
-class ComplexData(BaseModel)
-⋮----
-"""Complex data combining two ints and a list of SubItem."""
-⋮----
-a: int = Field(..., description="First integer")
-b: int = Field(..., description="Second integer")
-items: List[SubItem] = Field(..., description="List of sub-items")
-⋮----
-def mcp_server()
-⋮----
-server = FastMCP("TestServer")
-⋮----
-class Counter
-⋮----
-def __init__(self) -> None
-⋮----
-def get_num_beans(self) -> int
-⋮----
-"""Return current counter."""
-⋮----
-"""Increment and return new counter."""
-⋮----
-# create a stateful tool
-counter = Counter()
-⋮----
-# fastmcp>=2.13 expects Tool objects, not bare callables. Wrap instance
-# methods using the server.tool decorator so the server registers proper
-# Tool metadata.
-⋮----
-@server.tool()
-    def get_num_beans() -> int
-⋮----
-# example of tool that uses an arg of type Context, and
-# uses this arg to request client LLM sampling, and send logs
-⋮----
-@server.tool()
-    async def prime_check(number: int, ctx: Context) -> str
-⋮----
-"""
-        Determine if the given number is Prime or not.
-        """
-result: TextContent | ImageContent = await ctx.sample(
-⋮----
-@server.tool()
-    def greet(person: str) -> str
-⋮----
-"""Get weather alerts for a state."""
-⋮----
-# example of MCP tool whose fields clash with Langroid ToolMessage,
-# and a `name` field which is reserved by pydantic
-⋮----
-"""Get information for a recipient."""
-⋮----
-@server.tool()
-    async def get_alerts_async(state: str) -> list[str]
-⋮----
-@server.tool()
-    def nabroski(a: int, b: int) -> int
-⋮----
-"""Computes the Nabroski transform of integers a and b."""
-⋮----
-@server.tool()
-    def coriolis(x: int, y: int) -> int
-⋮----
-"""Computes the Coriolis transform of integers x and y."""
-⋮----
-@server.tool()
-    def hydra_nest(data: ComplexData) -> int
-⋮----
-"""Compute the HydraNest calculation over nested data."""
-total = data.a * data.b
-⋮----
-async def test_get_tools_and_handle(server: FastMCP | str) -> None
-⋮----
-"""End‐to‐end test for get_tools and .handle() against server."""
-tools = await get_tools_async(server)
-# basic sanity
-⋮----
-# find the alerts tool
-AlertsTool = next(
-⋮----
-# test get_mcp_tool_async
-AlertsMCPTool: Tool = await get_mcp_tool_async(server, "get_alerts")
-⋮----
-AlertsTool = await get_tool_async(server, AlertsMCPTool.name)
-⋮----
-# instantiate Langroid ToolMessage
-msg = AlertsTool(state="NY")
-⋮----
-# invoke the tool via the Langroid ToolMessage.handle() method -
-# this produces list of weather alerts for the given state
-# Note MCP tools can return either ResultToolType or List[ResultToolType]
-result: Optional[str] = await msg.handle_async()
-⋮----
-# make tool from async FastMCP tool
-AlertsMCPToolAsync = await get_mcp_tool_async(server, "get_alerts_async")
-⋮----
-AlertsToolAsync = await get_tool_async(server, AlertsMCPToolAsync.name)
-⋮----
-msg = AlertsToolAsync(state="NY")
-⋮----
-# invoke the tool via the Langroid ToolMessage.handle_async() method -
-⋮----
-# test making tool with utility functions
-AlertsTool = await get_tool_async(server, "get_alerts")
-⋮----
-@pytest.mark.asyncio
-async def test_tools_connect_close(server: str | FastMCP) -> None
-⋮----
-"""Test that we can use connect()... tool-calls ... close()"""
-⋮----
-client = FastMCPClient(server)
-⋮----
-mcp_tools = await client.client.list_tools()
-⋮----
-langroid_tool_classes = await client.get_tools_async()
-⋮----
-AlertsMCPTool = await get_mcp_tool_async(server, "get_alerts")
-⋮----
-result = await msg.handle_async()
-⋮----
-@pytest.mark.asyncio
-async def test_stateful_tool() -> None
-⋮----
-# instantiate the server
-server = mcp_server()
-⋮----
-# get tools from the SAME instance of the server
-AddBeansTool = await get_tool_async(server, "add_beans")
-⋮----
-GetNumBeansTool = await get_tool_async(server, "get_num_beans")
-⋮----
-add_beans_msg = AddBeansTool(x=5)
-⋮----
-result = await add_beans_msg.handle_async()
-⋮----
-get_num_beans_msg = GetNumBeansTool()
-⋮----
-result = await get_num_beans_msg.handle_async()
-⋮----
-@pytest.mark.asyncio
-async def test_tool_with_context_and_sampling() -> None
-⋮----
-"""Handle a sampling request from server"""
-# simulate an LLM call
-⋮----
-PrimeCheckTool = await get_tool_async(
-⋮----
-# assert that "ctx" is NOT a field in the tool
-⋮----
-prime_check_msg = PrimeCheckTool(number=7)
-⋮----
-result = await prime_check_msg.handle_async()
-⋮----
-@pytest.mark.asyncio
-async def test_mcp_tool_schemas() -> None
-⋮----
-"""
-    Test that descriptions, field-descriptions of MCP tools are preserved
-    when we translate them to Langroid ToolMessage classes. This is important
-    since the LLM is shown these, and helps with tool-call accuracy.
-    """
-# make a langroid AlertsTool from the corresponding MCP tool
-AlertsTool = await get_tool_async(mcp_server(), "get_alerts")
-⋮----
-description = "Get weather alerts for a state."
-⋮----
-schema: lm.LLMFunctionSpec = AlertsTool.llm_function_schema()
-⋮----
-InfoTool = await get_tool_async(mcp_server(), "info_tool")
-⋮----
-description = "Get information for a recipient."
-⋮----
-# instantiate InfoTool
-msg = InfoTool(
-⋮----
-# call the tool
-⋮----
-@pytest.mark.asyncio
-async def test_single_output() -> None
-⋮----
-"""Test that a tool with a single string output works
-    similarly to one that has a list of strings outputs."""
-⋮----
-OneAlertTool = await get_tool_async(mcp_server(), "get_one_alert")
-⋮----
-msg = OneAlertTool(state="NY")
-⋮----
-# we expect a list containing a single str
-⋮----
-@pytest.mark.asyncio
-async def test_agent_mcp_tools() -> None
-⋮----
-"""Test that a Langroid ChatAgent can use and handle MCP tools."""
-⋮----
-agent = lr.ChatAgent(
-⋮----
-NabroskiTool: lr.ToolMessage = await get_tool_async(server, "nabroski")
-⋮----
-response: lr.ChatDocument = await agent.llm_response_async(
-tools = agent.get_tool_messages(response)
-⋮----
-result: lr.ChatDocument = await agent.agent_response_async(response)
-# TODO assert needs to take LLM tool-forgetting into account
-⋮----
-task = lr.Task(agent, interactive=False)
-result: lr.ChatDocument = await task.run_async(
-⋮----
-# test MCP tool with fields that clash with Langroid ToolMessage
-InfoTool = await get_tool_async(server, "info_tool")
-⋮----
-# Need to define the tools outside async def,
-# since the decorator uses asyncio.run() to wrap around an async fn
-⋮----
-@mcp_tool(mcp_server(), "get_alerts")
-class GetAlertsTool(lr.ToolMessage)
-⋮----
-"""Tool to get weather alerts."""
-⋮----
-async def my_handler(self) -> str
-⋮----
-alert = await self.handle_async()
-⋮----
-@mcp_tool(mcp_server(), "nabroski")
-class NabroskiTool(lr.ToolMessage)
-⋮----
-"""Tool to get Nabroski transform."""
-⋮----
-result = await self.handle_async()
-⋮----
-@pytest.mark.asyncio
-async def test_fastmcp_decorator() -> None
-⋮----
-"""Test that the mcp_tool decorator works as expected."""
-⋮----
-msg = GetAlertsTool(state="NY")
-⋮----
-result = await msg.my_handler()
-⋮----
-result = await task.run_async("What is the nabroski transform of 5 and 3?", turns=3)
-⋮----
-@mcp_tool(mcp_server(), "hydra_nest")
-class HydraNestTool(lr.ToolMessage)
-⋮----
-"""Tool for computing HydraNest calculation."""
-⋮----
-"""Call hydra_nest and format result."""
-⋮----
-@pytest.mark.asyncio
-async def test_complex_tool_decorator() -> None
-⋮----
-"""Test that compute_complex via decorator works end‐to‐end."""
-# build nested input
-payload = {
-msg = HydraNestTool(**payload)
-⋮----
-# call handler
-⋮----
-expected = int(4 * 5 + 2 * 1.5 + 3 * 2.0)
-⋮----
-# round‐trip via an agent
-⋮----
-prompt = """
-response = await task.run_async(prompt, turns=2)
-⋮----
-@pytest.mark.asyncio
-async def test_multiple_tools(prompt, tool_name, expected) -> None
-⋮----
-"""
-    Test one-shot enabling of multiple tools.
-    """
-⋮----
-all_tools = await get_tools_async(mcp_server())
-⋮----
-tool = next(
-⋮----
-# test that agent (LLM) can pick right tool based on prompt
-prompt = "use one of your TOOLs to answer this: " + prompt
-response: lr.ChatDocument = await agent.llm_response_async(prompt)
-⋮----
-# test in a task
-⋮----
-result: lr.ChatDocument = await task.run_async(prompt, turns=3)
-⋮----
-@pytest.mark.asyncio
-async def test_npxstdio_transport() -> None
-⋮----
-"""
-    Test that we can create Langroid ToolMessage from an MCP server
-    via npx stdio transport, for example the `exa-mcp-server`:
-    https://github.com/exa-labs/exa-mcp-server
-    """
-# Pin to 0.2.12 because 0.2.14+ depends on @modelcontextprotocol/sdk@1.25.2
-# which doesn't exist on npm (as of Jan 2026)
-package_name = "tavily-mcp@0.2.12"
-⋮----
-# Pre-check package availability to provide better error messages
-⋮----
-transport = NpxStdioTransport(
-# Add timeout to prevent hanging during npx package download/initialization
-⋮----
-tools = await asyncio.wait_for(get_tools_async(transport), timeout=60.0)
-⋮----
-# Catch other potential MCP/subprocess errors in CI environments
-⋮----
-# Re-raise if it's not a known npx/subprocess issue
-⋮----
-WebSearchTool = await get_tool_async(transport, "tavily-search")
-⋮----
-# Note: we shouldn't have to explicitly beg the LLM to use the tool here
-# but I've found that even GPT-4o sometimes fails to use the tool
-question = f"""
-⋮----
-result: lr.ChatDocument = await task.run_async(question, turns=10)
-⋮----
-@pytest.mark.asyncio
-async def test_uvxstdio_transport() -> None
-⋮----
-"""
-    Test that we can create Langroid ToolMessage from an MCP server
-    via uvx stdio transport. We use this example `git` MCP server:
-    https://github.com/modelcontextprotocol/servers/tree/main/src/git
-    """
-transport = UvxStdioTransport(
-⋮----
-# `tool_name` is a misleading name -- it really refers to the
-# MCP server, which offers several tools
-⋮----
-# Add timeout and robust skipping similar to npx test
-⋮----
-GitStatusTool = await get_tool_async(transport, "git_status")
-⋮----
-prompt = f"""
-⋮----
-response = await agent.llm_response_async(prompt)
-⋮----
-result: lr.ChatDocument = await task.run_async(prompt, turns=10)
-⋮----
-@pytest.mark.xfail(reason="External MCP server returns inconsistent responses")
-@pytest.mark.asyncio
-async def test_npxstdio_transport_memory() -> None
-⋮----
-"""
-    Test that we can create Langroid ToolMessage from the `memory` MCP server
-    via npx stdio transport:
-    https://github.com/modelcontextprotocol/servers/tree/main/src/memory
-    """
-package_name = "@modelcontextprotocol/server-memory"
-⋮----
-# Run the task just so LLM emits any necessary tool calls to store info,
-# and the handlers execute them
-task = lr.Task(agent, interactive=False, restart=False)
-⋮----
-# now run the same task to retrieve info using search_nodes tool
-⋮----
-result: lr.ChatDocument = await task.run_async(prompt, turns=6)
-⋮----
-@pytest.mark.asyncio
-async def test_persist_connection() -> None
-⋮----
-"""Test that persist_connection keeps the connection open between tool calls."""
-⋮----
-# Create client with persist_connection=True
-⋮----
-# First tool call - this should create and keep the connection open
-tool1 = await client.get_tool_async("add_beans")
-⋮----
-# Check that client connection is established
-⋮----
-initial_client = client.client
-⋮----
-# Second tool call - should reuse the same connection
-tool2 = await client.get_tool_async("get_num_beans")
-⋮----
-# Verify the same client connection was reused
-⋮----
-# Call the tools to ensure they work
-add_msg = tool1(x=5)
-result1 = await add_msg.handle_async()
-assert result1 == "5"  # handle_async returns string for backward compatibility
-⋮----
-get_msg = tool2()
-result2 = await get_msg.handle_async()
-assert result2 == "5"  # handle_async returns string for backward compatibility
-⋮----
-@pytest.mark.asyncio
-async def test_handle_async_with_images() -> None
-⋮----
-"""Test that response_async returns ChatDocument with file attachments."""
-# Create a mock server that returns image content
-server = FastMCP("ImageServer")
-⋮----
-@server.tool()
-    async def get_chart() -> List[TextContent | ImageContent]
-⋮----
-"""Get a chart with image."""
-⋮----
-data="iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==",  # noqa: E501
-⋮----
-# Get the tool and test response_async
-⋮----
-ChartTool = await client.get_tool_async("get_chart")
-⋮----
-# Create a mock agent
-agent = lr.ChatAgent(lr.ChatAgentConfig())
-⋮----
-# Test response_async method
-chart_msg = ChartTool()
-response = await chart_msg.handle_async(agent)
-⋮----
-# Verify we got a ChatDocument
-⋮----
-# Verify we have file attachments in the files attribute
-⋮----
-# Verify the file is an image
-file = response.files[0]
-⋮----
-@pytest.mark.asyncio
-async def test_forward_text_resources() -> None
-⋮----
-"""Test that forward_text_resources setting works correctly."""
-⋮----
-server = FastMCP("TextResourceServer")
-⋮----
-# Test the _convert_tool_result method directly with mocked data
-⋮----
-# Create a mock CallToolResult with text and text resource
-mock_result = CallToolResult(
-⋮----
-# Test with forward_text_resources=True
-result = client._convert_tool_result("test_tool", mock_result)
-⋮----
-# Should include both the main text and the resource text
-⋮----
-# Test with forward_text_resources=False
-⋮----
-# Should only include the main text, not the resource text
-⋮----
-@pytest.mark.asyncio
-async def test_forward_blob_resources() -> None
-⋮----
-"""Test that forward_blob_resources setting works correctly."""
-⋮----
-server = FastMCP("BlobResourceServer")
-⋮----
-# Small PNG data (1x1 blue pixel)
-png_data = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAAD0lEQVR42mNkYPhfz/ADAAKAA4RkT4UVAAAAAElFTkSuQmCC"  # noqa: E501
-⋮----
-# Create a mock CallToolResult with text and blob resource
-⋮----
-# Test with forward_blob_resources=True
-⋮----
-# Should have text content and file attachment
-⋮----
-# Test with forward_blob_resources=False
-⋮----
-# Should only have text content, no file attachments
-⋮----
-@pytest.mark.asyncio
-async def test_stdio_example_like_decorator_clone(tmp_path) -> None
-⋮----
-"""Decorator-style example that should pass with Stdio cloning and fail if reused.
-
-    This mirrors the structure of the example script in
-    examples/mcp/claude-code-mcp-single.py:
-    we create a single StdioTransport and pass it to
-    @mcp_tool at "import time" (inside the test).
-    We then explicitly stop the underlying transport after the decorator-time
-    schema fetch to simulate servers that exit after the first session. With the
-    current clone policy for plain Stdio, the subsequent runtime call uses a
-    fresh transport and succeeds. If you revert the client to reuse Stdio
-    transports globally (pre-fix), this test reproduces the same failure the
-    example showed (initialize → "session was closed unexpectedly").
-    """
-⋮----
-# Minimal stdio MCP server with a single ping tool
-server_code = (
-script = tmp_path / "ping_server.py"
-⋮----
-transport = StdioTransport(command="python", args=[str(script)])
-⋮----
-# Decorator-time: build ToolMessage class from the single StdioTransport.
-# We are inside an async test (running event loop), so using the decorator
-# (which sync-calls asyncio.run) would trigger a loop error. Instead, we
-# call get_tool_async directly to mirror the decorator’s effect.
-PingBase = await get_tool_async(transport, "ping")
-⋮----
-class PingTool(PingBase):  # type: ignore
-⋮----
-# Simulate servers that exit after first session by explicitly stopping
-# the underlying transport after the decorator-time schema fetch
-⋮----
-transport._stop_event.set()  # type: ignore[attr-defined]
-⋮----
-# Runtime: under the clone policy, this uses a fresh StdioTransport and works.
-# If the client is reverted to reuse StdioTransport globally, this will fail
-# with the same "session was closed unexpectedly" seen in the example.
-msg = PingTool()
-⋮----
-@pytest.mark.asyncio
-async def test_as_server_factory_reuse_policy_split() -> None
-⋮----
-"""Verify that Langroid reuses Npx transport instances but clones plain stdio.
-
-    This guards against regressions where reusing a generic StdioTransport across
-    decorator-time and runtime caused reconnect failures for some CLI servers,
-    while ensuring we still reuse NpxStdioTransport to keep stateful servers alive.
-    """
-⋮----
-# Plain StdioTransport should be CLONED (two calls produce different objects)
-stdio = StdioTransport(command="python", args=["-c", "print('ok')"])
-stdio_factory: Callable[[], object] = FastMCPClient._as_server_factory(stdio)
-a = stdio_factory()
-b = stdio_factory()
-⋮----
-# NpxStdioTransport should be REUSED (same object instance)
-npx = NpxStdioTransport(package="dummy-pkg")
-npx_factory: Callable[[], object] = FastMCPClient._as_server_factory(npx)
-x = npx_factory()
-y = npx_factory()
-⋮----
-@pytest.mark.asyncio
-async def test_optional_fields() -> None
-⋮----
-"""Test MCP tools with optional fields can be instantiated with only
-    required fields.
-
-    This is the REAL bug: when an MCP tool has optional fields
-    (not in "required" array, no defaults), we should be able to create
-    an instance with ONLY the required fields.
-    Without the fix, this raises ValidationError.
-    """
-⋮----
-# Create a real MCP server
-⋮----
-# Create a Tool with the problematic schema
-# (optional fields WITHOUT defaults in the schema)
-problematic_tool = Tool(
-⋮----
-# ONLY pattern is required - others have NO defaults
-⋮----
-# Convert this to a Langroid ToolMessage
-⋮----
-# Replace the get_mcp_tool_async to return our problematic tool
-async def get_problematic_tool(name: str)
-⋮----
-SearchTool = await client.get_tool_async("grep_like_tool")
-⋮----
-# CRITICAL TEST: Can we instantiate with ONLY the required field?
-# WITHOUT the fix, this raises:
-#   ValidationError: 4 validation errors for tool
-#   path: Input should be a valid string
-#   case_insensitive: Input should be a valid boolean
-#   max_results: Input should be a valid integer
-# WITH the fix, this works because optional fields are
-#   Optional[type] = None
-msg = SearchTool(pattern="test")
-⋮----
-@pytest.mark.asyncio
-async def test_optional_fields_exclude_none_in_payload() -> None
-⋮----
-"""Test that optional fields with None values are excluded from MCP payload.
-
-    When LLM provides only required fields, optional fields are None.
-    These None values must NOT be sent to the MCP server - they should be excluded.
-    Without exclude_none=True, the MCP server receives None values and may fail.
-    """
-⋮----
-# Create Tool with optional fields
-tool_def = Tool(
-⋮----
-# Create client with persist_connection=True to keep same client instance
-captured_payload = {}
-⋮----
-# Mock the session.call_tool to capture what payload is sent
-async def mock_call_tool(tool_name: str, arguments: dict)
-⋮----
-captured_payload = arguments
-# Return a valid result
-⋮----
-# Get the tool
-async def get_tool(name: str)
-⋮----
-GrepTool = await client.get_tool_async("grep_tool")
-⋮----
-# Instantiate with only required field
-msg = GrepTool(pattern="test")
-⋮----
-# Call the tool - this will send payload to MCP server
-⋮----
-# CRITICAL TEST: Payload should NOT contain None values
-# WITHOUT exclude_none=True:
-#   payload = {"pattern": "test", "path": None,
-#              "case_insensitive": None}
-# WITH exclude_none=True:
-#   payload = {"pattern": "test"}
-⋮----
-assert "path" not in captured_payload  # Should be excluded because it's None
-assert "case_insensitive" not in captured_payload  # Should be excluded
 </file>
 
 <file path="README.md">
