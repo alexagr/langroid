@@ -230,3 +230,57 @@ def test_run_query_with_dangerous_ops_allowed_runs_drop(session):
         session.execute(
             __import__("sqlalchemy").text("SELECT COUNT(*) FROM items")
         ).scalar()
+
+
+# ---------------------------------------------------------------------------
+# Regex-blocklist bypass via quoting / comments / schema qualification
+# (GHSA-6xc5-4r68-67fc) -- caught by the AST-side function-name check.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "query",
+    [
+        # Quoted identifier: the `"` between name and `(` defeats `\bpg_..\s*\(`.
+        "SELECT \"pg_read_file\"('/etc/passwd')",
+        # Inline comment between name and `(`.
+        "SELECT pg_read_file/**/('/etc/passwd')",
+        # Schema-qualified + quoted.
+        "SELECT pg_catalog.\"pg_read_file\"('/etc/passwd')",
+        # Schema-qualified (unquoted) form -- equivalent function call.
+        "SELECT pg_catalog.pg_read_file('/etc/passwd')",
+        # Same tricks applied to the rest of the dangerous family.
+        "SELECT \"pg_stat_file\"('x')",
+        "SELECT pg_ls_logdir/**/()",
+        "SELECT pg_catalog.lo_import('/etc/passwd')",
+        # Case-folding: validator must be case-insensitive on the AST too.
+        "SELECT PG_READ_FILE('/etc/passwd')",
+        "SELECT Pg_Catalog.\"Pg_Read_File\"('x')",
+    ],
+)
+def test_ast_dangerous_function_bypasses_blocked(session, query):
+    """The reporter's regex bypasses (and equivalents) must be rejected by the
+    AST-side function-name check."""
+    agent = _make_agent(session)
+    rejection = agent._validate_query(query)
+    assert rejection is not None
+    assert "REJECTED" in rejection
+
+
+@pytest.mark.parametrize(
+    "query",
+    [
+        # Benign pg_* functions outside the dangerous prefix set must remain
+        # allowed (guard against AST-check over-match).
+        "SELECT pg_typeof(1)",
+        "SELECT pg_backend_pid()",
+        # Quoted/schema-qualified forms of benign functions must also pass.
+        'SELECT "pg_typeof"(1)',
+        "SELECT pg_catalog.pg_backend_pid()",
+        # Ordinary user query.
+        "SELECT name FROM items",
+    ],
+)
+def test_ast_check_does_not_overmatch_benign_functions(session, query):
+    agent = _make_agent(session)
+    assert agent._validate_query(query) is None

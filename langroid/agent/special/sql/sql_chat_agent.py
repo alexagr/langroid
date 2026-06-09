@@ -9,7 +9,17 @@ Functionality includes:
 
 import logging
 import re
-from typing import Any, Dict, List, Optional, Sequence, Union
+from typing import (
+    Any,
+    Dict,
+    FrozenSet,
+    Iterator,
+    List,
+    Optional,
+    Sequence,
+    Tuple,
+    Union,
+)
 
 from rich.console import Console
 
@@ -148,6 +158,59 @@ _DANGEROUS_SQL_PATTERNS: List["re.Pattern[str]"] = [
     ),
     re.compile(r"\bcreate\s+extension\b", re.IGNORECASE),
 ]
+
+
+# AST-side blocklist of dangerous SQL function names, applied after sqlglot
+# parses the query. The raw-text regex above can be bypassed by quoted
+# identifiers, inline comments, or schema qualification -- e.g.
+# `"pg_read_file"(...)`, `pg_read_file/**/(...)`,
+# `pg_catalog."pg_read_file"(...)` -- but sqlglot normalizes all those forms
+# to the same function-call node, so a name-based check on the parsed tree
+# catches every variant (GHSA-6xc5-4r68-67fc).
+_DANGEROUS_FUNCTION_NAMES: FrozenSet[str] = frozenset(
+    {
+        "load_file",  # MySQL/MariaDB filesystem read
+        "load_extension",  # SQLite extension loader
+        "sp_oacreate",  # MSSQL OLE automation
+        "sp_oamethod",  # MSSQL OLE automation
+    }
+)
+# Prefix families: any function whose normalized name starts with one of these
+# is considered dangerous. Mirrors the `\bpg_(read|stat|ls|current_logfile)...`
+# and `\blo_(import|export)\b` regex coverage, but on the parsed AST.
+_DANGEROUS_FUNCTION_PREFIXES: Tuple[str, ...] = (
+    "pg_read",
+    "pg_stat",
+    "pg_ls",
+    "pg_current_logfile",
+    "lo_",
+)
+
+
+def _is_dangerous_function_name(name: str) -> bool:
+    """True if `name` (case-folded, unquoted) is a dangerous SQL function."""
+    if name in _DANGEROUS_FUNCTION_NAMES:
+        return True
+    return any(name.startswith(p) for p in _DANGEROUS_FUNCTION_PREFIXES)
+
+
+def _called_function_names(stmt: Any) -> Iterator[str]:
+    """Yield normalized (case-folded, unquoted, schema-stripped) names of
+    every function-call node in `stmt` (a parsed sqlglot expression)."""
+    for node in stmt.find_all(sqlglot_exp.Func):
+        if isinstance(node, sqlglot_exp.Anonymous):
+            this = node.this
+            if isinstance(this, sqlglot_exp.Expression):
+                name = this.name
+            else:
+                name = str(this) if this is not None else ""
+        else:
+            # Typed sqlglot Func subclass: its class key is the SQL keyword.
+            name = getattr(type(node), "key", "") or ""
+        # Strip any schema qualifier that leaked into the name string.
+        name = name.rsplit(".", 1)[-1].strip().lower()
+        if name:
+            yield name
 
 
 # Default set of SQL statement types the agent is allowed to execute when
@@ -621,6 +684,24 @@ class SQLChatAgent(ChatAgent):
                     f"(or set `allow_dangerous_operations=True`) on the "
                     f"SQLChatAgent config."
                 )
+            # AST-side dangerous-function check: catches calls that evaded
+            # `_DANGEROUS_SQL_PATTERNS` via quoted identifiers, inline comments,
+            # or schema qualification (GHSA-6xc5-4r68-67fc).
+            for fn_name in _called_function_names(stmt):
+                if _is_dangerous_function_name(fn_name):
+                    logger.warning(
+                        "SQLChatAgent rejected query calling dangerous "
+                        f"function {fn_name!r}: {query!r}"
+                    )
+                    return (
+                        f"Query REJECTED for safety: it calls function "
+                        f"{fn_name!r}, which enables code execution, "
+                        f"filesystem access, or other unsafe operations. "
+                        f"Rewrite the query without using this function, or "
+                        f"ask the operator to set "
+                        f"`allow_dangerous_operations=True` on the "
+                        f"SQLChatAgent config."
+                    )
         return None
 
     def run_query(self, msg: RunQueryTool) -> str:
