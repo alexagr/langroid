@@ -1281,6 +1281,27 @@ class Agent(ABC):
             return tool.recipient == "" or tool.recipient == self.config.name
         return True
 
+    def _filter_user_origin_tools(
+        self,
+        msg: str | ChatDocument | None,
+        tools: List[ToolMessage],
+    ) -> List[ToolMessage]:
+        """If ``msg`` originates from :attr:`Entity.USER`, drop any tools whose
+        ``request`` is not in :attr:`llm_tools_usable`.
+
+        Rationale: ``enable_message(..., use=False, handle=True)`` is meant to
+        register tools triggered by an LLM's output (this agent's, or another
+        agent's in a multi-agent setup). A raw user input that happens to
+        contain such a tool's JSON should not bypass the LLM and invoke the
+        handler directly (GHSA-gjgq-w2m6-wr5q). Non-``ChatDocument`` inputs and
+        non-``USER`` senders are returned unchanged.
+        """
+        if not isinstance(msg, ChatDocument):
+            return tools
+        if msg.metadata.sender != Entity.USER:
+            return tools
+        return [t for t in tools if t.default_value("request") in self.llm_tools_usable]
+
     def has_only_unhandled_tools(self, msg: str | ChatDocument) -> bool:
         """
         Does the msg have at least one tool, and none of the tools in the msg are
@@ -1661,6 +1682,14 @@ class Agent(ABC):
             # as a response to the tool message even though the tool was not intended
             # for this agent.
             return None
+        # Security: USER-origin tool JSON must not be able to invoke tools that
+        # the LLM itself is not allowed to use. ``enable_message(..., use=False,
+        # handle=True)`` is intended for tools triggered by an LLM's output (this
+        # agent's or, in multi-agent setups, another agent's), not by raw user
+        # input. Filtering here ensures that an end user typing tool JSON cannot
+        # bypass the LLM and directly invoke such a handler
+        # (GHSA-gjgq-w2m6-wr5q).
+        tools = self._filter_user_origin_tools(msg, tools)
         if len(tools) > 1 and not self.config.allow_multiple_tools:
             return self.to_ChatDocument("ERROR: Use ONE tool at a time!")
         if len(tools) == 0:
@@ -1725,6 +1754,9 @@ class Agent(ABC):
             # as a response to the tool message even though the tool was not intended
             # for this agent.
             return None
+        # Security: see ``handle_message_async`` -- the same USER-origin filter
+        # also applies on the sync path (GHSA-gjgq-w2m6-wr5q).
+        tools = self._filter_user_origin_tools(msg, tools)
         if len(tools) == 0:
             fallback_result = self.handle_message_fallback(msg)
             if fallback_result is None:
