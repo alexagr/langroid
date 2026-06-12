@@ -895,7 +895,20 @@ class Agent(ABC):
             function_call=function_call,
             oai_tool_choice=oai_tool_choice,
             metadata=ChatDocMetaData(
-                source=e, sender=e, sender_name=self.config.name, recipient=recipient
+                source=e,
+                sender=e,
+                sender_name=self.config.name,
+                recipient=recipient,
+                # Trust tools structurally produced by an LLM or agent/handler
+                # (explicit `tool_messages`): they must survive
+                # _filter_user_origin_tools after a Task relabels the sender to
+                # USER for a handoff. Content-only / echoed responses carry no
+                # structured tool_messages, so they are NOT marked and stay
+                # filtered (GHSA-gjgq-w2m6-wr5q). Known gap: tools repackaged
+                # from untrusted content (e.g. via get_tool_messages) are still
+                # trusted here -- see issue #1035 for the taint-propagation fix.
+                tools_from_agent=bool(tool_messages)
+                and e in (Entity.LLM, Entity.AGENT),
             ),
         )
 
@@ -1286,19 +1299,41 @@ class Agent(ABC):
         msg: str | ChatDocument | None,
         tools: List[ToolMessage],
     ) -> List[ToolMessage]:
-        """If ``msg`` originates from :attr:`Entity.USER`, drop any tools whose
+        """If ``msg`` is raw input from :attr:`Entity.USER`, drop any tools whose
         ``request`` is not in :attr:`llm_tools_usable`.
 
         Rationale: ``enable_message(..., use=False, handle=True)`` is meant to
         register tools triggered by an LLM's output (this agent's, or another
         agent's in a multi-agent setup). A raw user input that happens to
         contain such a tool's JSON should not bypass the LLM and invoke the
-        handler directly (GHSA-gjgq-w2m6-wr5q). Non-``ChatDocument`` inputs and
-        non-``USER`` senders are returned unchanged.
+        handler directly (GHSA-gjgq-w2m6-wr5q).
+
+        Legitimate agent-to-agent handoffs are preserved: when a Task relays
+        another agent's LLM/handler output to a sub-agent it relabels the
+        sender to ``USER`` but sets ``metadata.tools_from_agent=True``; such
+        messages are returned unchanged, since their tools came from an LLM,
+        not from raw user input.
+
+        Limitation: ``tools_from_agent`` is a message-origin signal and guards
+        only the *direct* case -- raw user input arriving at the agent that
+        receives it. It does NOT defend against an agent that deliberately
+        forwards/repackages untrusted user content into structured
+        ``tool_messages`` (e.g. an ``agent_response`` echoing ``msg.content``,
+        or ``DonePassTool``/``AgentDoneTool`` re-emitting tools parsed from a
+        USER message); such forwarding is the developer's responsibility. A
+        robust taint-propagation fix is tracked in issue #1035.
+
+        Non-``ChatDocument`` inputs and non-``USER`` senders are returned
+        unchanged.
         """
         if not isinstance(msg, ChatDocument):
             return tools
         if msg.metadata.sender != Entity.USER:
+            return tools
+        if msg.metadata.tools_from_agent:
+            # Tools were produced by an agent's LLM/handler (possibly relayed
+            # across a multi-agent handoff), not raw user input -- safe to
+            # dispatch handle-only tools.
             return tools
         return [t for t in tools if t.default_value("request") in self.llm_tools_usable]
 
