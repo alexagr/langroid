@@ -624,6 +624,8 @@ class Task:
                 content=msg,
                 metadata=ChatDocMetaData(
                     sender=Entity.USER,
+                    # external user input -> untrusted (#1035)
+                    tainted=True,
                 ),
             )
         elif msg is None and len(self.agent.message_history) > 1:
@@ -642,6 +644,16 @@ class Task:
                 self.pending_message = ChatDocument.deepcopy(msg)
                 # Preserve the parent pointer from the original message
                 self.pending_message.metadata.parent_id = original_parent_id
+                # A USER-origin ChatDocument handed to a ROOT task (caller is
+                # None) is external untrusted input (e.g. Task.run(ChatDocument(
+                # sender=USER, ...))) that bypassed the tainting constructors --
+                # taint it. Sub-task inputs (caller is not None, relabeled to
+                # USER just below) keep their propagated taint; we only set. #1035
+                if (
+                    self.caller is None
+                    and self.pending_message.metadata.sender == Entity.USER
+                ):
+                    self.pending_message.metadata.tainted = True
             if self.pending_message is not None and self.caller is not None:
                 # msg may have come from `caller`, so we pretend this is from
                 # the CURRENT task's USER entity
@@ -1827,6 +1839,9 @@ class Task:
                     and result_msg is not None
                     and result_msg.metadata.tools_from_agent
                 ),
+                # Propagate the DISTRUST mark across the USER relabel so laundered
+                # (USER-derived) tools stay vetoed at the parent agent (#1035).
+                tainted=result_msg is not None and result_msg.metadata.tainted,
             ),
         )
         if self.pending_message is not None:

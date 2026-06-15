@@ -31611,181 +31611,6 @@ search_results = google_search(self.query, self.num_results)
     def examples(cls) -> List["ToolMessage" | Tuple[str, "ToolMessage"]]
 </file>
 
-<file path="langroid/agent/tools/orchestration.py">
-"""
-Various tools to for agents to be able to control flow of Task, e.g.
-termination, routing to another agent, etc.
-"""
-⋮----
-class AgentDoneTool(ToolMessage)
-⋮----
-"""Tool for AGENT entity (i.e. agent_response or downstream tool handling fns) to
-    signal the current task is done."""
-⋮----
-purpose: str = """
-request: str = "agent_done_tool"
-content: Any = None
-tools: List[ToolMessage] = []
-# only meant for agent_response or tool-handlers, not for LLM generation:
-_allow_llm_use: bool = False
-⋮----
-def response(self, agent: ChatAgent) -> ChatDocument
-⋮----
-content_str = "" if self.content is None else to_string(self.content)
-⋮----
-class DoneTool(ToolMessage)
-⋮----
-"""Tool for Agent Entity (i.e. agent_response) or LLM entity (i.e. llm_response) to
-    signal the current task is done, with some content as the result."""
-⋮----
-request: str = "done_tool"
-content: str = ""
-⋮----
-@field_validator("content", mode="before")
-@classmethod
-    def convert_content_to_string(cls, v: Any) -> str
-⋮----
-"""Convert content to string if it's not already."""
-⋮----
-@classmethod
-    def instructions(cls) -> str
-⋮----
-tool_name = cls.default_value("request")
-⋮----
-class ResultTool(ToolMessage)
-⋮----
-"""Class to use as a wrapper for sending arbitrary results from an Agent's
-    agent_response or tool handlers, to:
-    (a) trigger completion of the current task (similar to (Agent)DoneTool), and
-    (b) be returned as the result of the current task, i.e. this tool would appear
-         in the resulting ChatDocument's `tool_messages` list.
-    See test_tool_handlers_and_results in test_tool_messages.py, and
-    examples/basic/tool-extract-short-example.py.
-
-    Note:
-        - when defining a tool handler or agent_response, you can directly return
-            ResultTool(field1 = val1, ...),
-            where the values can be arbitrary data structures, including nested
-            Pydantic objs, or you can define a subclass of ResultTool with the
-            fields you want to return.
-        - This is a special ToolMessage that is NOT meant to be used or handled
-            by an agent.
-        - AgentDoneTool is more restrictive in that you can only send a `content`
-            or `tools` in the result.
-    """
-⋮----
-request: str = "result_tool"
-purpose: str = "Ignored; Wrapper for a structured message"
-id: str = ""  # placeholder for OpenAI-API tool_call_id
-⋮----
-model_config = ConfigDict(
-⋮----
-def handle(self) -> AgentDoneTool
-⋮----
-class FinalResultTool(ToolMessage)
-⋮----
-"""Class to use as a wrapper for sending arbitrary results from an Agent's
-    agent_response or tool handlers, to:
-    (a) trigger completion of the current task as well as all parent tasks, and
-    (b) be returned as the final result of the root task, i.e. this tool would appear
-         in the final ChatDocument's `tool_messages` list.
-    See test_tool_handlers_and_results in test_tool_messages.py, and
-    examples/basic/chat-tool-function.py.
-
-    Note:
-        - when defining a tool handler or agent_response, you can directly return
-            FinalResultTool(field1 = val1, ...),
-            where the values can be arbitrary data structures, including nested
-            Pydantic objs, or you can define a subclass of FinalResultTool with the
-            fields you want to return.
-        - This is a special ToolMessage that is NOT meant to be used by an agent's
-            llm_response, but only by agent_response or tool handlers.
-        - A subclass of this tool can be defined, with specific fields, and
-          with _allow_llm_use = True, to allow the LLM to generate this tool,
-          and have the effect of terminating the current and all parent tasks,
-          with the tool appearing in the final ChatDocument's `tool_messages` list.
-          See examples/basic/multi-agent-return-result.py.
-    """
-⋮----
-request: str = ""
-⋮----
-class PassTool(ToolMessage)
-⋮----
-"""Tool for "passing" on the received msg (ChatDocument),
-    so that an as-yet-unspecified agent can handle it.
-    Similar to ForwardTool, but without specifying the recipient agent.
-    """
-⋮----
-request: str = "pass_tool"
-⋮----
-def response(self, agent: ChatAgent, chat_doc: ChatDocument) -> ChatDocument
-⋮----
-"""When this tool is enabled for an Agent, this will result in a method
-        added to the Agent with signature:
-        `pass_tool(self, tool: PassTool, chat_doc: ChatDocument) -> ChatDocument:`
-        """
-# if PassTool is in chat_doc, pass its parent, else pass chat_doc itself
-doc = chat_doc
-⋮----
-tools = agent.get_tool_messages(doc)
-⋮----
-doc = doc.parent
-⋮----
-new_doc = ChatDocument.deepcopy(doc)
-⋮----
-class DonePassTool(PassTool)
-⋮----
-"""Tool to signal DONE, AND Pass incoming/current msg as result.
-    Similar to PassTool, except we append a DoneTool to the result tool_messages.
-    """
-⋮----
-request: str = "done_pass_tool"
-⋮----
-# use PassTool to get the right ChatDocument to pass...
-new_doc = PassTool.response(self, agent, chat_doc)
-tools = agent.get_tool_messages(new_doc)
-# ...then return an AgentDoneTool with content, tools from this ChatDocument
-return AgentDoneTool(content=new_doc.content, tools=tools)  # type: ignore
-⋮----
-class ForwardTool(PassTool)
-⋮----
-"""Tool for forwarding the received msg (ChatDocument) to another agent or entity.
-    Similar to PassTool, but with a specified recipient agent.
-    """
-⋮----
-request: str = "forward_tool"
-agent: str
-⋮----
-"""When this tool is enabled for an Agent, this will result in a method
-        added to the Agent with signature:
-        `forward_tool(self, tool: ForwardTool, chat_doc: ChatDocument) -> ChatDocument:`
-        """
-# if chat_doc contains ForwardTool, then we forward its parent ChatDocument;
-# else forward chat_doc itself
-⋮----
-class SendTool(ToolMessage)
-⋮----
-"""Tool for agent or LLM to send content to a specified agent.
-    Similar to RecipientTool.
-    """
-⋮----
-request: str = "send_tool"
-to: str
-⋮----
-@classmethod
-    def examples(cls) -> List["ToolMessage" | Tuple[str, "ToolMessage"]]
-⋮----
-class AgentSendTool(ToolMessage)
-⋮----
-"""Tool for Agent (i.e. agent_response) to send content or tool_messages
-    to a specified agent. Similar to SendTool except that AgentSendTool is only
-    usable by agent_response (or handler of another tool), to send content or
-    tools to another agent. SendTool does not allow sending tools.
-    """
-⋮----
-request: str = "agent_send_tool"
-</file>
-
 <file path="langroid/agent/tools/recipient_tool.py">
 """
 The `recipient_tool` is used to send a message to a specific recipient.
@@ -44722,6 +44547,188 @@ results_str = "\n\n".join(str(result) for result in search_results)
     def examples(cls) -> List["ToolMessage" | Tuple[str, "ToolMessage"]]
 </file>
 
+<file path="langroid/agent/tools/orchestration.py">
+"""
+Various tools to for agents to be able to control flow of Task, e.g.
+termination, routing to another agent, etc.
+"""
+⋮----
+class AgentDoneTool(ToolMessage)
+⋮----
+"""Tool for AGENT entity (i.e. agent_response or downstream tool handling fns) to
+    signal the current task is done."""
+⋮----
+purpose: str = """
+request: str = "agent_done_tool"
+content: Any = None
+tools: List[ToolMessage] = []
+# only meant for agent_response or tool-handlers, not for LLM generation:
+_allow_llm_use: bool = False
+# DISTRUST mark (#1035): set by DonePassTool when the passed message is
+# tainted, so the repackaged tools stay vetoed by _filter_user_origin_tools.
+_tainted: bool = False
+⋮----
+def response(self, agent: ChatAgent) -> ChatDocument
+⋮----
+content_str = "" if self.content is None else to_string(self.content)
+⋮----
+class DoneTool(ToolMessage)
+⋮----
+"""Tool for Agent Entity (i.e. agent_response) or LLM entity (i.e. llm_response) to
+    signal the current task is done, with some content as the result."""
+⋮----
+request: str = "done_tool"
+content: str = ""
+⋮----
+@field_validator("content", mode="before")
+@classmethod
+    def convert_content_to_string(cls, v: Any) -> str
+⋮----
+"""Convert content to string if it's not already."""
+⋮----
+@classmethod
+    def instructions(cls) -> str
+⋮----
+tool_name = cls.default_value("request")
+⋮----
+class ResultTool(ToolMessage)
+⋮----
+"""Class to use as a wrapper for sending arbitrary results from an Agent's
+    agent_response or tool handlers, to:
+    (a) trigger completion of the current task (similar to (Agent)DoneTool), and
+    (b) be returned as the result of the current task, i.e. this tool would appear
+         in the resulting ChatDocument's `tool_messages` list.
+    See test_tool_handlers_and_results in test_tool_messages.py, and
+    examples/basic/tool-extract-short-example.py.
+
+    Note:
+        - when defining a tool handler or agent_response, you can directly return
+            ResultTool(field1 = val1, ...),
+            where the values can be arbitrary data structures, including nested
+            Pydantic objs, or you can define a subclass of ResultTool with the
+            fields you want to return.
+        - This is a special ToolMessage that is NOT meant to be used or handled
+            by an agent.
+        - AgentDoneTool is more restrictive in that you can only send a `content`
+            or `tools` in the result.
+    """
+⋮----
+request: str = "result_tool"
+purpose: str = "Ignored; Wrapper for a structured message"
+id: str = ""  # placeholder for OpenAI-API tool_call_id
+⋮----
+model_config = ConfigDict(
+⋮----
+def handle(self) -> AgentDoneTool
+⋮----
+class FinalResultTool(ToolMessage)
+⋮----
+"""Class to use as a wrapper for sending arbitrary results from an Agent's
+    agent_response or tool handlers, to:
+    (a) trigger completion of the current task as well as all parent tasks, and
+    (b) be returned as the final result of the root task, i.e. this tool would appear
+         in the final ChatDocument's `tool_messages` list.
+    See test_tool_handlers_and_results in test_tool_messages.py, and
+    examples/basic/chat-tool-function.py.
+
+    Note:
+        - when defining a tool handler or agent_response, you can directly return
+            FinalResultTool(field1 = val1, ...),
+            where the values can be arbitrary data structures, including nested
+            Pydantic objs, or you can define a subclass of FinalResultTool with the
+            fields you want to return.
+        - This is a special ToolMessage that is NOT meant to be used by an agent's
+            llm_response, but only by agent_response or tool handlers.
+        - A subclass of this tool can be defined, with specific fields, and
+          with _allow_llm_use = True, to allow the LLM to generate this tool,
+          and have the effect of terminating the current and all parent tasks,
+          with the tool appearing in the final ChatDocument's `tool_messages` list.
+          See examples/basic/multi-agent-return-result.py.
+    """
+⋮----
+request: str = ""
+⋮----
+class PassTool(ToolMessage)
+⋮----
+"""Tool for "passing" on the received msg (ChatDocument),
+    so that an as-yet-unspecified agent can handle it.
+    Similar to ForwardTool, but without specifying the recipient agent.
+    """
+⋮----
+request: str = "pass_tool"
+⋮----
+def response(self, agent: ChatAgent, chat_doc: ChatDocument) -> ChatDocument
+⋮----
+"""When this tool is enabled for an Agent, this will result in a method
+        added to the Agent with signature:
+        `pass_tool(self, tool: PassTool, chat_doc: ChatDocument) -> ChatDocument:`
+        """
+# if PassTool is in chat_doc, pass its parent, else pass chat_doc itself
+doc = chat_doc
+⋮----
+tools = agent.get_tool_messages(doc)
+⋮----
+doc = doc.parent
+⋮----
+new_doc = ChatDocument.deepcopy(doc)
+⋮----
+class DonePassTool(PassTool)
+⋮----
+"""Tool to signal DONE, AND Pass incoming/current msg as result.
+    Similar to PassTool, except we append a DoneTool to the result tool_messages.
+    """
+⋮----
+request: str = "done_pass_tool"
+⋮----
+# use PassTool to get the right ChatDocument to pass...
+new_doc = PassTool.response(self, agent, chat_doc)
+tools = agent.get_tool_messages(new_doc)
+# ...then return an AgentDoneTool with content, tools from this ChatDocument
+done_tool = AgentDoneTool(content=new_doc.content, tools=tools)
+# Carry taint: if the passed message is USER-derived, these tools were
+# parsed out of untrusted content -- keep them vetoed downstream (#1035).
+⋮----
+return done_tool  # type: ignore
+⋮----
+class ForwardTool(PassTool)
+⋮----
+"""Tool for forwarding the received msg (ChatDocument) to another agent or entity.
+    Similar to PassTool, but with a specified recipient agent.
+    """
+⋮----
+request: str = "forward_tool"
+agent: str
+⋮----
+"""When this tool is enabled for an Agent, this will result in a method
+        added to the Agent with signature:
+        `forward_tool(self, tool: ForwardTool, chat_doc: ChatDocument) -> ChatDocument:`
+        """
+# if chat_doc contains ForwardTool, then we forward its parent ChatDocument;
+# else forward chat_doc itself
+⋮----
+class SendTool(ToolMessage)
+⋮----
+"""Tool for agent or LLM to send content to a specified agent.
+    Similar to RecipientTool.
+    """
+⋮----
+request: str = "send_tool"
+to: str
+⋮----
+@classmethod
+    def examples(cls) -> List["ToolMessage" | Tuple[str, "ToolMessage"]]
+⋮----
+class AgentSendTool(ToolMessage)
+⋮----
+"""Tool for Agent (i.e. agent_response) to send content or tool_messages
+    to a specified agent. Similar to SendTool except that AgentSendTool is only
+    usable by agent_response (or handler of another tool), to send content or
+    tools to another agent. SendTool does not allow sending tools.
+    """
+⋮----
+request: str = "agent_send_tool"
+</file>
+
 <file path="langroid/agent/tools/seltz_search_tool.py">
 """
 A tool to trigger a Seltz search for a given query and return the top results.
@@ -46521,6 +46528,386 @@ results = []
 result = WebSearchResult(
 ⋮----
 link=None,  # skip HTTP fetch; Seltz already provides content
+</file>
+
+<file path="langroid/utils/pydantic_utils.py">
+logger = logging.getLogger(__name__)
+⋮----
+"""Flatten a nested dictionary, using a separator in the keys.
+    Useful for pydantic_v1 models with nested fields -- first use
+        dct = mdl.model_dump()
+    to get a nested dictionary, then use this function to flatten it.
+    """
+items: List[Tuple[str, Any]] = []
+⋮----
+new_key = f"{parent_key}{sep}{k}" if parent_key else k
+⋮----
+def has_field(model_class: Type[BaseModel], field_name: str) -> bool
+⋮----
+"""Check if a Pydantic model class has a field with the given name."""
+⋮----
+def _recursive_purge_dict_key(d: Dict[str, Any], k: str) -> None
+⋮----
+"""Remove a key from a dictionary recursively"""
+⋮----
+"""
+    Given a possibly nested Pydantic class, return a flattened version of it,
+    by constructing top-level fields, whose names are formed from the path
+    through the nested structure, separated by double underscores.
+
+    This version ignores inherited defaults, so it is incomplete.
+    But retaining it as it is simpler and may be useful in some cases.
+    The full version is `flatten_pydantic_model`, see below.
+
+    Args:
+        model (Type[BaseModel]): The Pydantic model to flatten.
+        base_model (Type[BaseModel], optional): The base model to use for the
+            flattened model. Defaults to BaseModel.
+
+    Returns:
+        Type[BaseModel]: The flattened Pydantic model.
+    """
+⋮----
+flattened_fields: Dict[str, Tuple[Any, ...]] = {}
+models_to_process = [(model, "")]
+⋮----
+new_prefix = (
+⋮----
+flattened_name = f"{current_prefix}{name}"
+⋮----
+"""
+    Given a possibly nested Pydantic class, return a flattened version of it,
+    by constructing top-level fields, whose names are formed from the path
+    through the nested structure, separated by double underscores.
+
+    Args:
+        model (Type[BaseModel]): The Pydantic model to flatten.
+        base_model (Type[BaseModel], optional): The base model to use for the
+            flattened model. Defaults to BaseModel.
+
+    Returns:
+        Type[BaseModel]: The flattened Pydantic model.
+    """
+⋮----
+flattened_fields: Dict[str, Any] = {}
+⋮----
+field_type = field.annotation if hasattr(field, "annotation") else field
+⋮----
+def get_field_names(model: Type[BaseModel]) -> List[str]
+⋮----
+"""Get all field names from a possibly nested Pydantic model."""
+mdl = flatten_pydantic_model(model)
+fields = list(mdl.model_fields.keys())
+# fields may be like a__b__c , so we only want the last part
+⋮----
+"""
+    Generates a JSON schema for a Pydantic model,
+    with options to exclude specific fields.
+
+    This function traverses the Pydantic model's fields, including nested models,
+    to generate a dictionary representing the JSON schema. Fields specified in
+    the exclude list will not be included in the generated schema.
+
+    Args:
+        model (Type[BaseModel]): The Pydantic model class to generate the schema for.
+        exclude (List[str]): A list of string field names to be excluded from the
+                             generated schema. Defaults to an empty list.
+
+    Returns:
+        Dict[str, Any]: A dictionary representing the JSON schema of the provided model,
+                        with specified fields excluded.
+    """
+⋮----
+output: Dict[str, Any] = {}
+⋮----
+continue  # Skip excluded fields
+⋮----
+# Recursively generate schema for nested models
+⋮----
+# Represent the type as a string here
+⋮----
+# Fallback for complex types
+⋮----
+# Non-model type, return a simplified representation
+⋮----
+"""
+    Given a possibly nested Pydantic instance, return a flattened version of it,
+    as a dict where nested traversal paths are translated to keys a__b__c.
+
+    Args:
+        instance (BaseModel): The Pydantic instance to flatten.
+        prefix (str, optional): The prefix to use for the top-level fields.
+        force_str (bool, optional): Whether to force all values to be strings.
+
+    Returns:
+        Dict[str, Any]: The flattened dict.
+
+    """
+flat_data: Dict[str, Any] = {}
+⋮----
+# Assuming nested pydantic model will be a dict here
+⋮----
+# Get field info from model_fields
+field_info = instance.model_fields[name]
+# Try to get the nested model type from field annotation
+field_type = (
+⋮----
+nested_flat_data = flatten_pydantic_instance(
+⋮----
+# Skip non-Pydantic nested fields for safety
+⋮----
+def extract_fields(doc: BaseModel, fields: List[str]) -> Dict[str, Any]
+⋮----
+"""
+    Extract specified fields from a Pydantic object.
+    Supports dotted field names, e.g. "metadata.author".
+    Dotted fields are matched exactly according to the corresponding path.
+    Non-dotted fields are matched against the last part of the path.
+    Clashes ignored.
+    Args:
+        doc (BaseModel): The Pydantic object.
+        fields (List[str]): The list of fields to extract.
+
+    Returns:
+        Dict[str, Any]: A dictionary of field names and values.
+
+    """
+⋮----
+def get_value(obj: BaseModel, path: str) -> Any | None
+⋮----
+obj = getattr(obj, part)
+⋮----
+def traverse(obj: BaseModel, result: Dict[str, Any], prefix: str = "") -> None
+⋮----
+key = f"{prefix}.{k}" if prefix else k
+⋮----
+result: Dict[str, Any] = {}
+⋮----
+# Extract values for dotted field names and use last part as key
+⋮----
+value = get_value(doc, field)
+⋮----
+key = field.split(".")[-1]
+⋮----
+# Traverse the object to get non-dotted fields
+all_fields: Dict[str, Any] = {}
+⋮----
+# Add non-dotted fields to the result.
+# Prefer top-level attributes (e.g. doc.title) over nested ones
+# (e.g. metadata.title) to avoid default metadata values overwriting
+# real top-level fields.
+⋮----
+direct_val = getattr(doc, field)
+⋮----
+"""
+    Given a flattened version of a nested dict, reconstruct the nested dict.
+    Field names in the flattened dict are assumed to be of the form
+    "field1__field2__field3", going from top level down.
+
+    Args:
+        flat_data (Dict[str, Any]): The flattened dict.
+        sub_dict (str, optional): The name of the sub-dict to extract from the
+            flattened dict. Defaults to "" (extract the whole dict).
+
+    Returns:
+        Dict[str, Any]: The nested dict.
+
+    """
+nested_data: Dict[str, Any] = {}
+⋮----
+keys = key.split("__")
+d = nested_data
+⋮----
+d = d.setdefault(k, {})
+⋮----
+if sub_dict != "":  # e.g. "payload"
+nested_data = nested_data[sub_dict]
+⋮----
+"""Flattened dict with a__b__c style keys -> nested dict -> pydantic object"""
+nested_data = nested_dict_from_flat(flat_data, sub_dict)
+⋮----
+original_values = {}
+⋮----
+# Save original value
+⋮----
+# Raise error for non-existent field
+⋮----
+# Handle validation error
+⋮----
+# Restore original values
+⋮----
+T = TypeVar("T", bound=BaseModel)
+⋮----
+@contextmanager
+def temp_params(config: T, field: str, temp: T) -> Generator[None, None, None]
+⋮----
+"""Context manager to temporarily override `field` in a `config`"""
+original_vals = getattr(config, field)
+⋮----
+# Apply temporary settings
+⋮----
+# Revert to original settings
+⋮----
+def numpy_to_python_type(numpy_type: Type[Any]) -> Type[Any]
+⋮----
+"""Converts a numpy data type to its Python equivalent."""
+type_mapping = {
+⋮----
+# Add other numpy types as necessary
+⋮----
+def dataframe_to_pydantic_model(df: pd.DataFrame) -> Type[BaseModel]
+⋮----
+"""Make a Pydantic model from a dataframe."""
+fields = {col: (type(df[col].iloc[0]), ...) for col in df.columns}
+return create_model("DataFrameModel", __base__=BaseModel, **fields)  # type: ignore
+⋮----
+def dataframe_to_pydantic_objects(df: pd.DataFrame) -> List[BaseModel]
+⋮----
+"""Make a list of Pydantic objects from a dataframe."""
+Model = dataframe_to_pydantic_model(df)
+⋮----
+def first_non_null(series: pd.Series) -> Any | None
+⋮----
+"""Find the first non-null item in a pandas Series."""
+⋮----
+"""
+    Make a subclass of Document from a dataframe.
+
+    Args:
+        df (pd.DataFrame): The dataframe.
+        content (str): The name of the column containing the content,
+            which will map to the Document.content field.
+        metadata (List[str]): A list of column names containing metadata;
+            these will be included in the Document.metadata field.
+        exclude (List[str]): A list of column names to exclude from the model.
+            (e.g. "vector" when lance is used to add an embedding vector to the df)
+
+    Returns:
+        Type[BaseModel]: A pydantic model subclassing Document.
+    """
+⋮----
+# Remove excluded columns
+df = df.drop(columns=exclude, inplace=False)
+# Check if metadata_cols is empty
+⋮----
+# Define fields for the dynamic subclass of DocMetaData
+metadata_fields = {
+⋮----
+None,  # Optional[numpy_to_python_type(type(first_non_null(df[col])))],
+⋮----
+DynamicMetaData = create_model(  # type: ignore
+⋮----
+# Use the base DocMetaData class directly
+DynamicMetaData = DocMetaData  # type: ignore
+⋮----
+# Define additional top-level fields for DynamicDocument
+additional_fields = {
+⋮----
+None,  # Optional[numpy_to_python_type(type(first_non_null(df[col])))],
+⋮----
+# Create a dynamic subclass of Document
+DynamicDocumentFields = {
+DynamicDocument = create_model(  # type: ignore
+⋮----
+content_val = row[content] if (content and content in row) else ""
+metadata_values = (
+additional_values = {
+metadata_obj = DynamicMetaData(**metadata_values)
+⋮----
+# Bind the method to the class
+DynamicDocument.from_df_row = classmethod(from_df_row)  # type: ignore
+⋮----
+return DynamicDocument  # type: ignore
+⋮----
+"""
+    Make a list of Document objects from a dataframe.
+    Args:
+        df (pd.DataFrame): The dataframe.
+        content (str): The name of the column containing the content,
+            which will map to the Document.content field.
+        metadata (List[str]): A list of column names containing metadata;
+            these will be included in the Document.metadata field.
+        doc_cls (Type[BaseModel], optional): A Pydantic model subclassing
+            Document. Defaults to None.
+    Returns:
+        List[Document]: The list of Document objects.
+    """
+Model = doc_cls or dataframe_to_document_model(df, content, metadata)
+docs = [
+⋮----
+Model.from_df_row(row, content, metadata)  # type: ignore
+⋮----
+def extra_metadata(document: Document, doc_cls: Type[Document] = Document) -> List[str]
+⋮----
+"""
+    Checks for extra fields in a document's metadata that are not defined in the
+    original metadata schema.
+
+    Args:
+        document (Document): The document instance to check for extra fields.
+        doc_cls (Type[Document]): The class type derived from Document, used
+            as a reference to identify extra fields in the document's metadata.
+
+    Returns:
+        List[str]: A list of strings representing the keys of the extra fields found
+        in the document's metadata.
+    """
+# Convert metadata to dict, including extra fields.
+metadata_fields = set(document.metadata.model_dump().keys())
+⋮----
+# Get defined fields in the metadata of doc_cls
+metadata_field = doc_cls.model_fields["metadata"]
+metadata_type = (
+⋮----
+defined_fields = set(metadata_type.model_fields.keys())
+⋮----
+defined_fields = set()
+⋮----
+# Identify extra fields not in defined fields.
+extra_fields = list(metadata_fields - defined_fields)
+⋮----
+def extend_document_class(d: Document) -> Type[Document]
+⋮----
+"""Generates a new pydantic class based on a given document instance.
+
+    This function dynamically creates a new pydantic class with additional
+    fields based on the "extra" metadata fields present in the given document
+    instance. The new class is a subclass of the original Document class, with
+    the original metadata fields retained and extra fields added as normal
+    fields to the metadata.
+
+    Args:
+        d: An instance of the Document class.
+
+    Returns:
+        A new subclass of the Document class that includes the additional fields
+        found in the metadata of the given document instance.
+    """
+# Extract the fields from the original metadata class, including types,
+# correctly handling special types like List[str].
+original_metadata_fields = {
+# Extract extra fields from the metadata instance with their types
+extra_fields = {
+⋮----
+# Combine original and extra fields for the new metadata class
+combined_fields = {**original_metadata_fields, **extra_fields}
+⋮----
+# Create a new metadata class with combined fields
+NewMetadataClass = create_model(  # type: ignore
+# NewMetadataClass.__config__.arbitrary_types_allowed = True
+⋮----
+# Create a new document class using the new metadata class
+NewDocumentClass = create_model(
+⋮----
+class PydanticWrapper(BaseModel)
+⋮----
+value: Any
+⋮----
+def get_pydantic_wrapper(value_type: type) -> type[PydanticWrapper]
+⋮----
+class WrappedValue(PydanticWrapper)
+⋮----
+value: value_type  # type: ignore
 </file>
 
 <file path="langroid/utils/system.py">
@@ -49913,386 +50300,6 @@ df = df.head(10)
 return df.to_string(index=False)  # type: ignore
 </file>
 
-<file path="langroid/utils/pydantic_utils.py">
-logger = logging.getLogger(__name__)
-⋮----
-"""Flatten a nested dictionary, using a separator in the keys.
-    Useful for pydantic_v1 models with nested fields -- first use
-        dct = mdl.model_dump()
-    to get a nested dictionary, then use this function to flatten it.
-    """
-items: List[Tuple[str, Any]] = []
-⋮----
-new_key = f"{parent_key}{sep}{k}" if parent_key else k
-⋮----
-def has_field(model_class: Type[BaseModel], field_name: str) -> bool
-⋮----
-"""Check if a Pydantic model class has a field with the given name."""
-⋮----
-def _recursive_purge_dict_key(d: Dict[str, Any], k: str) -> None
-⋮----
-"""Remove a key from a dictionary recursively"""
-⋮----
-"""
-    Given a possibly nested Pydantic class, return a flattened version of it,
-    by constructing top-level fields, whose names are formed from the path
-    through the nested structure, separated by double underscores.
-
-    This version ignores inherited defaults, so it is incomplete.
-    But retaining it as it is simpler and may be useful in some cases.
-    The full version is `flatten_pydantic_model`, see below.
-
-    Args:
-        model (Type[BaseModel]): The Pydantic model to flatten.
-        base_model (Type[BaseModel], optional): The base model to use for the
-            flattened model. Defaults to BaseModel.
-
-    Returns:
-        Type[BaseModel]: The flattened Pydantic model.
-    """
-⋮----
-flattened_fields: Dict[str, Tuple[Any, ...]] = {}
-models_to_process = [(model, "")]
-⋮----
-new_prefix = (
-⋮----
-flattened_name = f"{current_prefix}{name}"
-⋮----
-"""
-    Given a possibly nested Pydantic class, return a flattened version of it,
-    by constructing top-level fields, whose names are formed from the path
-    through the nested structure, separated by double underscores.
-
-    Args:
-        model (Type[BaseModel]): The Pydantic model to flatten.
-        base_model (Type[BaseModel], optional): The base model to use for the
-            flattened model. Defaults to BaseModel.
-
-    Returns:
-        Type[BaseModel]: The flattened Pydantic model.
-    """
-⋮----
-flattened_fields: Dict[str, Any] = {}
-⋮----
-field_type = field.annotation if hasattr(field, "annotation") else field
-⋮----
-def get_field_names(model: Type[BaseModel]) -> List[str]
-⋮----
-"""Get all field names from a possibly nested Pydantic model."""
-mdl = flatten_pydantic_model(model)
-fields = list(mdl.model_fields.keys())
-# fields may be like a__b__c , so we only want the last part
-⋮----
-"""
-    Generates a JSON schema for a Pydantic model,
-    with options to exclude specific fields.
-
-    This function traverses the Pydantic model's fields, including nested models,
-    to generate a dictionary representing the JSON schema. Fields specified in
-    the exclude list will not be included in the generated schema.
-
-    Args:
-        model (Type[BaseModel]): The Pydantic model class to generate the schema for.
-        exclude (List[str]): A list of string field names to be excluded from the
-                             generated schema. Defaults to an empty list.
-
-    Returns:
-        Dict[str, Any]: A dictionary representing the JSON schema of the provided model,
-                        with specified fields excluded.
-    """
-⋮----
-output: Dict[str, Any] = {}
-⋮----
-continue  # Skip excluded fields
-⋮----
-# Recursively generate schema for nested models
-⋮----
-# Represent the type as a string here
-⋮----
-# Fallback for complex types
-⋮----
-# Non-model type, return a simplified representation
-⋮----
-"""
-    Given a possibly nested Pydantic instance, return a flattened version of it,
-    as a dict where nested traversal paths are translated to keys a__b__c.
-
-    Args:
-        instance (BaseModel): The Pydantic instance to flatten.
-        prefix (str, optional): The prefix to use for the top-level fields.
-        force_str (bool, optional): Whether to force all values to be strings.
-
-    Returns:
-        Dict[str, Any]: The flattened dict.
-
-    """
-flat_data: Dict[str, Any] = {}
-⋮----
-# Assuming nested pydantic model will be a dict here
-⋮----
-# Get field info from model_fields
-field_info = instance.model_fields[name]
-# Try to get the nested model type from field annotation
-field_type = (
-⋮----
-nested_flat_data = flatten_pydantic_instance(
-⋮----
-# Skip non-Pydantic nested fields for safety
-⋮----
-def extract_fields(doc: BaseModel, fields: List[str]) -> Dict[str, Any]
-⋮----
-"""
-    Extract specified fields from a Pydantic object.
-    Supports dotted field names, e.g. "metadata.author".
-    Dotted fields are matched exactly according to the corresponding path.
-    Non-dotted fields are matched against the last part of the path.
-    Clashes ignored.
-    Args:
-        doc (BaseModel): The Pydantic object.
-        fields (List[str]): The list of fields to extract.
-
-    Returns:
-        Dict[str, Any]: A dictionary of field names and values.
-
-    """
-⋮----
-def get_value(obj: BaseModel, path: str) -> Any | None
-⋮----
-obj = getattr(obj, part)
-⋮----
-def traverse(obj: BaseModel, result: Dict[str, Any], prefix: str = "") -> None
-⋮----
-key = f"{prefix}.{k}" if prefix else k
-⋮----
-result: Dict[str, Any] = {}
-⋮----
-# Extract values for dotted field names and use last part as key
-⋮----
-value = get_value(doc, field)
-⋮----
-key = field.split(".")[-1]
-⋮----
-# Traverse the object to get non-dotted fields
-all_fields: Dict[str, Any] = {}
-⋮----
-# Add non-dotted fields to the result.
-# Prefer top-level attributes (e.g. doc.title) over nested ones
-# (e.g. metadata.title) to avoid default metadata values overwriting
-# real top-level fields.
-⋮----
-direct_val = getattr(doc, field)
-⋮----
-"""
-    Given a flattened version of a nested dict, reconstruct the nested dict.
-    Field names in the flattened dict are assumed to be of the form
-    "field1__field2__field3", going from top level down.
-
-    Args:
-        flat_data (Dict[str, Any]): The flattened dict.
-        sub_dict (str, optional): The name of the sub-dict to extract from the
-            flattened dict. Defaults to "" (extract the whole dict).
-
-    Returns:
-        Dict[str, Any]: The nested dict.
-
-    """
-nested_data: Dict[str, Any] = {}
-⋮----
-keys = key.split("__")
-d = nested_data
-⋮----
-d = d.setdefault(k, {})
-⋮----
-if sub_dict != "":  # e.g. "payload"
-nested_data = nested_data[sub_dict]
-⋮----
-"""Flattened dict with a__b__c style keys -> nested dict -> pydantic object"""
-nested_data = nested_dict_from_flat(flat_data, sub_dict)
-⋮----
-original_values = {}
-⋮----
-# Save original value
-⋮----
-# Raise error for non-existent field
-⋮----
-# Handle validation error
-⋮----
-# Restore original values
-⋮----
-T = TypeVar("T", bound=BaseModel)
-⋮----
-@contextmanager
-def temp_params(config: T, field: str, temp: T) -> Generator[None, None, None]
-⋮----
-"""Context manager to temporarily override `field` in a `config`"""
-original_vals = getattr(config, field)
-⋮----
-# Apply temporary settings
-⋮----
-# Revert to original settings
-⋮----
-def numpy_to_python_type(numpy_type: Type[Any]) -> Type[Any]
-⋮----
-"""Converts a numpy data type to its Python equivalent."""
-type_mapping = {
-⋮----
-# Add other numpy types as necessary
-⋮----
-def dataframe_to_pydantic_model(df: pd.DataFrame) -> Type[BaseModel]
-⋮----
-"""Make a Pydantic model from a dataframe."""
-fields = {col: (type(df[col].iloc[0]), ...) for col in df.columns}
-return create_model("DataFrameModel", __base__=BaseModel, **fields)  # type: ignore
-⋮----
-def dataframe_to_pydantic_objects(df: pd.DataFrame) -> List[BaseModel]
-⋮----
-"""Make a list of Pydantic objects from a dataframe."""
-Model = dataframe_to_pydantic_model(df)
-⋮----
-def first_non_null(series: pd.Series) -> Any | None
-⋮----
-"""Find the first non-null item in a pandas Series."""
-⋮----
-"""
-    Make a subclass of Document from a dataframe.
-
-    Args:
-        df (pd.DataFrame): The dataframe.
-        content (str): The name of the column containing the content,
-            which will map to the Document.content field.
-        metadata (List[str]): A list of column names containing metadata;
-            these will be included in the Document.metadata field.
-        exclude (List[str]): A list of column names to exclude from the model.
-            (e.g. "vector" when lance is used to add an embedding vector to the df)
-
-    Returns:
-        Type[BaseModel]: A pydantic model subclassing Document.
-    """
-⋮----
-# Remove excluded columns
-df = df.drop(columns=exclude, inplace=False)
-# Check if metadata_cols is empty
-⋮----
-# Define fields for the dynamic subclass of DocMetaData
-metadata_fields = {
-⋮----
-None,  # Optional[numpy_to_python_type(type(first_non_null(df[col])))],
-⋮----
-DynamicMetaData = create_model(  # type: ignore
-⋮----
-# Use the base DocMetaData class directly
-DynamicMetaData = DocMetaData  # type: ignore
-⋮----
-# Define additional top-level fields for DynamicDocument
-additional_fields = {
-⋮----
-None,  # Optional[numpy_to_python_type(type(first_non_null(df[col])))],
-⋮----
-# Create a dynamic subclass of Document
-DynamicDocumentFields = {
-DynamicDocument = create_model(  # type: ignore
-⋮----
-content_val = row[content] if (content and content in row) else ""
-metadata_values = (
-additional_values = {
-metadata_obj = DynamicMetaData(**metadata_values)
-⋮----
-# Bind the method to the class
-DynamicDocument.from_df_row = classmethod(from_df_row)  # type: ignore
-⋮----
-return DynamicDocument  # type: ignore
-⋮----
-"""
-    Make a list of Document objects from a dataframe.
-    Args:
-        df (pd.DataFrame): The dataframe.
-        content (str): The name of the column containing the content,
-            which will map to the Document.content field.
-        metadata (List[str]): A list of column names containing metadata;
-            these will be included in the Document.metadata field.
-        doc_cls (Type[BaseModel], optional): A Pydantic model subclassing
-            Document. Defaults to None.
-    Returns:
-        List[Document]: The list of Document objects.
-    """
-Model = doc_cls or dataframe_to_document_model(df, content, metadata)
-docs = [
-⋮----
-Model.from_df_row(row, content, metadata)  # type: ignore
-⋮----
-def extra_metadata(document: Document, doc_cls: Type[Document] = Document) -> List[str]
-⋮----
-"""
-    Checks for extra fields in a document's metadata that are not defined in the
-    original metadata schema.
-
-    Args:
-        document (Document): The document instance to check for extra fields.
-        doc_cls (Type[Document]): The class type derived from Document, used
-            as a reference to identify extra fields in the document's metadata.
-
-    Returns:
-        List[str]: A list of strings representing the keys of the extra fields found
-        in the document's metadata.
-    """
-# Convert metadata to dict, including extra fields.
-metadata_fields = set(document.metadata.model_dump().keys())
-⋮----
-# Get defined fields in the metadata of doc_cls
-metadata_field = doc_cls.model_fields["metadata"]
-metadata_type = (
-⋮----
-defined_fields = set(metadata_type.model_fields.keys())
-⋮----
-defined_fields = set()
-⋮----
-# Identify extra fields not in defined fields.
-extra_fields = list(metadata_fields - defined_fields)
-⋮----
-def extend_document_class(d: Document) -> Type[Document]
-⋮----
-"""Generates a new pydantic class based on a given document instance.
-
-    This function dynamically creates a new pydantic class with additional
-    fields based on the "extra" metadata fields present in the given document
-    instance. The new class is a subclass of the original Document class, with
-    the original metadata fields retained and extra fields added as normal
-    fields to the metadata.
-
-    Args:
-        d: An instance of the Document class.
-
-    Returns:
-        A new subclass of the Document class that includes the additional fields
-        found in the metadata of the given document instance.
-    """
-# Extract the fields from the original metadata class, including types,
-# correctly handling special types like List[str].
-original_metadata_fields = {
-# Extract extra fields from the metadata instance with their types
-extra_fields = {
-⋮----
-# Combine original and extra fields for the new metadata class
-combined_fields = {**original_metadata_fields, **extra_fields}
-⋮----
-# Create a new metadata class with combined fields
-NewMetadataClass = create_model(  # type: ignore
-# NewMetadataClass.__config__.arbitrary_types_allowed = True
-⋮----
-# Create a new document class using the new metadata class
-NewDocumentClass = create_model(
-⋮----
-class PydanticWrapper(BaseModel)
-⋮----
-value: Any
-⋮----
-def get_pydantic_wrapper(value_type: type) -> type[PydanticWrapper]
-⋮----
-class WrappedValue(PydanticWrapper)
-⋮----
-value: value_type  # type: ignore
-</file>
-
 <file path="plugins/langroid/skills/patterns/quiet-mode.md">
 # Quiet Mode - Suppressing Verbose Agent Output
 
@@ -50501,6 +50508,638 @@ corresponding document.
    context.
 
    - Reference: `./quiet-mode.md`
+</file>
+
+<file path="langroid/agent/special/sql/sql_chat_agent.py">
+"""
+Agent that allows interaction with an SQL database using SQLAlchemy library.
+The agent can execute SQL queries in the database and return the result.
+
+Functionality includes:
+- adding table and column context
+- asking a question about a SQL schema
+"""
+⋮----
+# sqlglot is required for the statement-type allowlist enforced in
+# `_validate_query`. Importing it at module load ensures the security
+# guarantee cannot be silently bypassed by a partial/stale install.
+⋮----
+logger = logging.getLogger(__name__)
+⋮----
+console = Console()
+⋮----
+DEFAULT_SQL_CHAT_SYSTEM_MESSAGE = """
+⋮----
+ADDRESSING_INSTRUCTION = """
+⋮----
+DONE_INSTRUCTION = f"""
+⋮----
+SQL_ERROR_MSG = "There was an error in your SQL Query"
+⋮----
+# Dialect-specific SQL patterns that enable code execution, arbitrary file
+# access, or other escapes from the database engine. Matched against the raw
+# query text (case-insensitive) as a defense-in-depth layer in addition to the
+# sqlglot-based statement-type allowlist.
+_DANGEROUS_SQL_PATTERNS: List["re.Pattern[str]"] = [
+⋮----
+# PostgreSQL: COPY ... FROM/TO PROGRAM executes shell commands as the DB
+# server OS user.
+⋮----
+# PostgreSQL server-side filesystem / log / WAL access. Match the whole
+# pg_read*, pg_stat*, pg_ls*, pg_current_logfile family rather than naming
+# individual functions: near-name functions (pg_read_file vs
+# pg_read_server_file, pg_ls_logdir vs pg_ls_dir, pg_stat_file, ...) all
+# yield the same file/metadata disclosure primitive.
+⋮----
+# MySQL/MariaDB filesystem
+⋮----
+# SQLite: load_extension enables loading arbitrary shared objects;
+# ATTACH can read/write arbitrary files. The DATABASE keyword is optional
+# per the SQLite grammar (ATTACH [DATABASE] expr AS schema-name), so match
+# both forms.
+⋮----
+# SQL Server: command execution, OLE automation, and ad-hoc external data
+# sources (OPENDATASOURCE is the connection-string counterpart of
+# OPENROWSET; both can read remote/UNC files).
+⋮----
+# Generic: stored-program creation and procedural language extensions.
+# LANGUAGE / RULE / EVENT TRIGGER / FOREIGN TABLE are additional PostgreSQL
+# primitives that can register attacker-controlled code.
+⋮----
+# AST-side blocklist of dangerous SQL function names, applied after sqlglot
+# parses the query. The raw-text regex above can be bypassed by quoted
+# identifiers, inline comments, or schema qualification -- e.g.
+# `"pg_read_file"(...)`, `pg_read_file/**/(...)`,
+# `pg_catalog."pg_read_file"(...)` -- but sqlglot normalizes all those forms
+# to the same function-call node, so a name-based check on the parsed tree
+# catches every variant (GHSA-6xc5-4r68-67fc).
+_DANGEROUS_FUNCTION_NAMES: FrozenSet[str] = frozenset(
+⋮----
+"load_file",  # MySQL/MariaDB filesystem read
+"load_extension",  # SQLite extension loader
+"sp_oacreate",  # MSSQL OLE automation
+"sp_oamethod",  # MSSQL OLE automation
+⋮----
+# Prefix families: any function whose normalized name starts with one of these
+# is considered dangerous. Mirrors the `\bpg_(read|stat|ls|current_logfile)...`
+# and `\blo_(import|export)\b` regex coverage, but on the parsed AST.
+_DANGEROUS_FUNCTION_PREFIXES: Tuple[str, ...] = (
+⋮----
+def _is_dangerous_function_name(name: str) -> bool
+⋮----
+"""True if `name` (case-folded, unquoted) is a dangerous SQL function."""
+⋮----
+def _called_function_names(stmt: Any) -> Iterator[str]
+⋮----
+"""Yield normalized (case-folded, unquoted, schema-stripped) names of
+    every function-call node in `stmt` (a parsed sqlglot expression)."""
+⋮----
+this = node.this
+⋮----
+name = this.name
+⋮----
+name = str(this) if this is not None else ""
+⋮----
+# Typed sqlglot Func subclass: its class key is the SQL keyword.
+name = getattr(type(node), "key", "") or ""
+# Strip any schema qualifier that leaked into the name string.
+name = name.rsplit(".", 1)[-1].strip().lower()
+⋮----
+# Default set of SQL statement types the agent is allowed to execute when
+# `allow_dangerous_operations` is False. SELECT-only is safe for Q&A workloads.
+_DEFAULT_ALLOWED_STATEMENTS: List[str] = ["SELECT"]
+⋮----
+class SQLChatAgentConfig(ChatAgentConfig)
+⋮----
+system_message: str = DEFAULT_SQL_CHAT_SYSTEM_MESSAGE
+user_message: None | str = None
+cache: bool = True  # cache results
+debug: bool = False
+use_helper: bool = True
+is_helper: bool = False
+stream: bool = True  # allow streaming where needed
+database_uri: str = ""  # Database URI
+database_session: None | Session = None  # Database session
+vecdb: None | VectorStoreConfig = None
+context_descriptions: Dict[str, Dict[str, Union[str, Dict[str, str]]]] = {}
+use_schema_tools: bool = False
+multi_schema: bool = False
+# whether the agent is used in a continuous chat with user,
+# as opposed to returning a result from the task.run()
+chat_mode: bool = False
+addressing_prefix: str = ""
+max_result_rows: int | None = None  # limit query results to this
+max_retained_tokens: int | None = None  # limit history of query results to this
+⋮----
+# --- Security controls (see CVE-2026-25879) ---------------------------
+# By default, the agent only executes SELECT statements and rejects any
+# query that matches a known dangerous pattern (e.g. PostgreSQL
+# `COPY ... FROM PROGRAM`, MySQL `INTO OUTFILE`, SQLite `load_extension`,
+# MSSQL `xp_cmdshell`). The LLM-generated SQL is influenceable by prompt
+# injection — including injection via data the LLM reads back from the
+# database — so executing it without restrictions is unsafe when the DB
+# role has elevated privileges.
+#
+# To enable writes: extend allowed_statement_types, e.g. ["SELECT",
+# "INSERT", "UPDATE", "DELETE"]. To disable all checks (only do this with
+# a least-privilege DB role and trusted prompts): set
+# allow_dangerous_operations=True.
+allowed_statement_types: List[str] = list(_DEFAULT_ALLOWED_STATEMENTS)
+allow_dangerous_operations: bool = False
+⋮----
+"""
+    Optional, but strongly recommended, context descriptions for tables, columns, 
+    and relationships. It should be a dictionary where each key is a table name 
+    and its value is another dictionary. 
+
+    In this inner dictionary:
+    - The 'description' key corresponds to a string description of the table.
+    - The 'columns' key corresponds to another dictionary where each key is a 
+    column name and its value is a string description of that column.
+    - The 'relationships' key corresponds to another dictionary where each key 
+    is another table name and the value is a description of the relationship to 
+    that table.
+
+    If multi_schema support is enabled, the tables names in the description
+    should be of the form 'schema_name.table_name'.
+
+    For example:
+    {
+        'table1': {
+            'description': 'description of table1',
+            'columns': {
+                'column1': 'description of column1 in table1',
+                'column2': 'description of column2 in table1'
+            }
+        },
+        'table2': {
+            'description': 'description of table2',
+            'columns': {
+                'column3': 'description of column3 in table2',
+                'column4': 'description of column4 in table2'
+            }
+        }
+    }
+    """
+⋮----
+class SQLChatAgent(ChatAgent)
+⋮----
+"""
+    Agent for chatting with a SQL database
+    """
+⋮----
+used_run_query: bool = False
+llm_responded: bool = False
+⋮----
+def __init__(self, config: "SQLChatAgentConfig") -> None
+⋮----
+"""Initialize the SQLChatAgent.
+
+        Raises:
+            ValueError: If database information is not provided in the config.
+        """
+⋮----
+# Caution - this updates the self.config.system_message!
+⋮----
+# helper_config.system_message is now the fully-populated sys msg of
+# the main SQLAgent.
+⋮----
+def _validate_config(self, config: "SQLChatAgentConfig") -> None
+⋮----
+"""Validate the configuration to ensure all necessary fields are present."""
+⋮----
+def _init_database(self) -> None
+⋮----
+"""Initialize the database engine and session."""
+⋮----
+def _init_metadata(self) -> None
+⋮----
+"""Initialize the database metadata."""
+⋮----
+inspector = inspect(self.engine)
+⋮----
+metadata = MetaData(schema=schema)
+⋮----
+def _init_table_metadata(self) -> None
+⋮----
+"""Initialize metadata for the tables present in the database."""
+⋮----
+def _init_system_message(self) -> None
+⋮----
+"""Initialize the system message."""
+message = self._format_message()
+⋮----
+allowed = sorted(
+⋮----
+def _init_tools(self) -> None
+⋮----
+"""Initialize sys msg and tools."""
+# Create a custom RunQueryTool class with the desired max_retained_tokens
+⋮----
+class CustomRunQueryTool(RunQueryTool)
+⋮----
+_max_retained_tokens = self.config.max_retained_tokens
+⋮----
+def _format_message(self) -> str
+⋮----
+"""Format the system message based on the engine and table metadata."""
+⋮----
+def _enable_schema_tools(self) -> None
+⋮----
+"""Enable tools for schema-related functionalities."""
+⋮----
+def _clarify_answer_instruction(self) -> str
+⋮----
+"""
+        Prompt to use when asking LLM to clarify intent of
+        an already-generated response
+        """
+⋮----
+def _clarifying_message(self) -> str
+⋮----
+tools_instruction = f"""
+⋮----
+"""
+        We'd end up here if the current msg has no tool.
+        If this is from LLM, we may need to handle the scenario where
+        it may have "forgotten" to generate a tool.
+        """
+⋮----
+# send any Non-tool msg to the user
+⋮----
+# Agent intent not clear => use the helper agent to
+# do what this agent should have done, e.g. generate tool, etc.
+# This is likelier to succeed since this agent has no "baggage" of
+# prior conversation, other than the system msg, and special
+# "Intent-interpretation" instructions.
+⋮----
+AnyTool = self._get_any_tool_message(optional=False)
+⋮----
+recovery_message = self._strict_recovery_instructions(
+result = self.llm_response(recovery_message)
+# remove the recovery_message (it has User role) from the chat history,
+# else it may cause the LLM to directly use the AnyTool.
+self.delete_last_message(role=Role.USER)  # delete last User-role msg
+⋮----
+response = self.helper_agent.llm_response(message)
+tools = self.try_get_tool_messages(response)
+⋮----
+# fall back on the clarification message
+⋮----
+def retry_query(self, e: Exception, query: str) -> str
+⋮----
+"""
+        Generate an error message for a failed SQL query and return it.
+
+        Parameters:
+        e (Exception): The exception raised during the SQL query execution.
+        query (str): The SQL query that failed.
+
+        Returns:
+        str: The error message.
+        """
+⋮----
+# Optional part to be included based on `use_schema_tools`
+optional_schema_description = ""
+⋮----
+optional_schema_description = f"""\
+⋮----
+# Construct the error message
+error_message_template = f"""\
+⋮----
+def _available_tool_names(self) -> str
+⋮----
+def _tool_result_llm_answer_prompt(self) -> str
+⋮----
+"""
+        Prompt to use at end of tool result,
+        to guide LLM, for the case where it wants to answer the user's query
+        """
+⋮----
+def _sqlglot_dialect(self) -> Optional[str]
+⋮----
+"""Map the SQLAlchemy dialect name to a sqlglot dialect name."""
+⋮----
+name: str = str(self.engine.dialect.name)
+# sqlglot uses 'postgres', not 'postgresql'; 'tsql' for MSSQL.
+mapping: Dict[str, str] = {"postgresql": "postgres", "mssql": "tsql"}
+⋮----
+def _validate_query(self, query: str) -> Optional[str]
+⋮----
+"""
+        Check whether `query` is permitted under the agent's security config.
+
+        Returns None if the query may be executed, otherwise an error message
+        explaining why it was rejected (to be relayed to the LLM).
+        """
+⋮----
+allowed = {t.strip().upper() for t in self.config.allowed_statement_types}
+⋮----
+statements = sqlglot.parse(query, read=self._sqlglot_dialect())
+⋮----
+kind_map = {
+⋮----
+kind = next(
+⋮----
+# AST-side dangerous-function check: catches calls that evaded
+# `_DANGEROUS_SQL_PATTERNS` via quoted identifiers, inline comments,
+# or schema qualification (GHSA-6xc5-4r68-67fc).
+⋮----
+def run_query(self, msg: RunQueryTool) -> str
+⋮----
+"""
+        Handle a RunQueryTool message by executing a SQL query and returning the result.
+
+        Args:
+            msg (RunQueryTool): The tool-message to handle.
+
+        Returns:
+            str: The result of executing the SQL query.
+        """
+query = msg.query
+session = self.Session
+⋮----
+rejection = self._validate_query(query)
+⋮----
+query_result = session.execute(text(query))
+⋮----
+# attempt to fetch results: should work for normal SELECT queries
+rows = query_result.fetchall()
+n_rows = len(rows)
+⋮----
+rows = rows[: self.config.max_result_rows]
+⋮----
+response_message = self._format_rows(rows)
+⋮----
+# If we get here, it's a non-SELECT query (UPDATE, INSERT, DELETE)
+affected_rows = query_result.rowcount  # type: ignore
+response_message = f"""
+⋮----
+response_message = self.retry_query(e, query)
+⋮----
+final_message = f"""
+⋮----
+def _format_rows(self, rows: Sequence[Row[Any]]) -> str
+⋮----
+"""
+        Format the rows fetched from the query result into a string.
+
+        Args:
+            rows (list): List of rows fetched from the query result.
+
+        Returns:
+            str: Formatted string representation of rows.
+        """
+# TODO: UPDATE FORMATTING
+⋮----
+def get_table_names(self, msg: GetTableNamesTool) -> str
+⋮----
+"""
+        Handle a GetTableNamesTool message by returning the names of all tables in the
+        database.
+
+        Returns:
+            str: The names of all tables in the database.
+        """
+⋮----
+table_names = [", ".join(md.tables.keys()) for md in self.metadata]
+⋮----
+def get_table_schema(self, msg: GetTableSchemaTool) -> str
+⋮----
+"""
+        Handle a GetTableSchemaTool message by returning the schema of all provided
+        tables in the database.
+
+        Returns:
+            str: The schema of all provided tables in the database.
+        """
+tables = msg.tables
+result = ""
+⋮----
+table = self.table_metadata.get(table_name)
+⋮----
+def get_column_descriptions(self, msg: GetColumnDescriptionsTool) -> str
+⋮----
+"""
+        Handle a GetColumnDescriptionsTool message by returning the descriptions of all
+        provided columns from the database.
+
+        Returns:
+            str: The descriptions of all provided columns from the database.
+        """
+table = msg.table
+columns = msg.columns.split(", ")
+result = f"\nTABLE: {table}"
+descriptions = self.config.context_descriptions.get(table)
+⋮----
+result += f"\n{col} => {descriptions['columns'][col]}"  # type: ignore
+⋮----
+class SQLHelperAgent(SQLChatAgent)
+⋮----
+"""Set up helper sys msg"""
+⋮----
+# Note that self.config.system_message is already set to the
+# parent SQLAgent's system_message
+⋮----
+# note that the initial msg in chat history will contain:
+# - system message
+# - tool instructions
+# so the final_instructions will be at the end of this initial msg
+⋮----
+message_str = message if isinstance(message, str) else message.content
+instruc_msg = f"""
+# user response_forget to avoid accumulating the chat history
+</file>
+
+<file path="mkdocs.yml">
+site_name: "langroid"
+repo_name: langroid/langroid
+site_description: "Langroid LLM App Development Framework"
+repo_url: https://github.com/langroid/langroid
+site_url: https://langroid.github.io/langroid
+
+edit_uri: ""
+extra_css:
+  - stylesheets/extra.css
+
+theme:
+  logo: assets/orange-logo-lambda-563.png
+  favicon: assets/orange-logo-lambda-563.png
+  features:
+    - navigation.tabs
+#    - navigation.tracking
+#    - navigation.sections
+#    - navigation.indexes
+    - toc
+    - content.code.copy
+    - content.code.select
+    - content.code.annotate
+  icon:
+      repo: fontawesome/brands/github
+  name: material
+  custom_dir: docs/overrides
+  palette:
+    # Palette toggle for light mode
+    - scheme: default
+      primary: indigo
+      accent: indigo
+      toggle:
+        icon: material/brightness-7
+        name: Switch to dark mode
+
+    # Palette toggle for dark mode
+    - scheme: slate
+      primary: indigo
+      accent: indigo
+      toggle:
+        icon: material/brightness-4
+        name: Switch to light mode
+
+plugins:
+  - blog:
+      archive: false
+      blog_toc: true
+      categories: false
+      blog_dir: blog
+
+  - rss:
+      enabled: true
+      match_path: blog/posts/.*
+      image: https://upload.wikimedia.org/wikipedia/commons/thumb/4/43/Feed-icon.svg/128px-Feed-icon.svg.png
+      date_from_meta:
+        as_creation: date
+      categories:
+        - categories
+        - tags
+  - search
+  - autorefs
+  #- awesome-pages
+  - gen-files:
+      scripts:
+      - docs/auto_docstring.py
+      #- docs/gen_ref_pages.py
+  - literate-nav:
+      nav_file: SUMMARY.md
+  - mkdocstrings:
+      default_handler: python
+      handlers:
+        python:
+          paths: [.]
+          options:
+            members_order: source
+            separate_signature: false
+            filters: ["!^_"]
+            docstring_options:
+              ignore_init_summary: true
+            merge_init_into_class: true
+  - section-index
+
+watch:
+  - langroid
+
+nav:
+  - Home: index.md
+  - Blog: blog/index.md
+  - Getting Started:
+    - quick-start/index.md
+    - Setup: quick-start/setup.md
+    - LLM interaction: quick-start/llm-interaction.md
+    - Simple Chat Agent: quick-start/chat-agent.md
+    - Task Delegation: quick-start/multi-agent-task-delegation.md
+    - Two Agent Chat: quick-start/two-agent-chat-num.md
+    - Three Agent Chat: quick-start/three-agent-chat-num.md
+    - Agent with Tools/Functions: quick-start/chat-agent-tool.md
+    - Three Agents, with Routing: quick-start/three-agent-chat-num-router.md
+    - Agent with Retrieval: quick-start/chat-agent-docs.md
+  # defer to gen-files + literate-nav
+  - FAQ: FAQ.md
+  - Notes-Updates:
+      - Overview: notes/overview.md
+      - XML-based Tools: notes/xml-tools.md
+      - Async Streaming: notes/async-streaming.md
+      - Knowledge Graphs: notes/knowledge-graphs.md
+      - Gemini LLMs, Embeddings, Vertex AI: notes/gemini.md
+      - LLM-based Pdf Parsing: notes/llm-pdf-parser.md
+      - Large Tool Results: notes/large-tool-results.md
+      - GLHF.chat Support: notes/glhf-chat.md
+      - Structured Output: notes/structured-output.md
+      - Tool Handlers: notes/tool-message-handler.md
+      - Task Termination: notes/task-termination.md
+      - Message Routing: notes/message-routing.md
+      - Llama.cpp Embeddings: notes/llama-cpp-embeddings.md
+      - Azure OpenAI models: notes/azure-openai-models.md
+      - Custom Azure OpenAI client: notes/custom-azure-client.md
+      - Enriching Chunks for Retrieval: notes/enriching-for-retrieval.md
+      - Reasoning Content: notes/reasoning-content.md
+      - Weaviate: notes/weaviate.md
+      - Handling LLM Non-Tool Messages: notes/handle-llm-no-tool.md
+      - PGVector: notes/pgvector.md
+      - Pinecone: notes/pinecone.md
+      - Tavily Search Tool: notes/tavily_search.md
+      - Seltz Search Tool: notes/seltz_search.md
+      - Twitter Search via Xquik MCP: notes/twitter-search.md
+      - Marker Pdf Parser: notes/marker-pdf.md
+      - URLLoader : notes/url_loader.md
+      - Crawl4AI Crawler: notes/crawl4ai.md
+      - LangDB AI Gateway: notes/langdb.md
+      - Portkey AI Gateway: notes/portkey.md
+      - Markitdown Parsers: notes/markitdown.md
+      - LiteLLM Proxy: notes/litellm-proxy.md
+      - Chunking: notes/chunking.md
+      - Image, PDF Input: notes/file-input.md
+      - MCP Tools: notes/mcp-tools.md
+      - Code-Injection Protection: notes/code-injection-protection.md
+      - TaskTool: notes/task-tool.md
+      - Local Qdrant VectorDB Cleanup: notes/qdrant-resource-cleanup.md
+      - OpenAI HTTP Client Configuration: notes/openai-http-client.md
+      - OpenAI Client Caching: notes/openai-client-caching.md
+      - Cross-Encoder Reranking: notes/cross-encoder.md
+      - Task Logs: notes/html-logger.md
+      - Pydantic v2 Migration: notes/pydantic-v2-migration.md
+
+  - Examples:
+    - Guide: examples/guide.md
+    - Hierarchical Agent Computation: examples/agent-tree.md
+    - Demos:
+      - Audience Targeting: demos/targeting/audience-targeting.md
+  - Tutorials:
+    - Langroid Tour: tutorials/langroid-tour.md
+    - Supported LLMs: tutorials/supported-models.md
+    - Local LLM Setup: tutorials/local-llm-setup.md
+    - Non-OpenAI LLMs: tutorials/non-openai-llms.md
+    - SQLChatAgent: tutorials/postgresql-agent.md
+    - LLM Usage Options: tutorials/llm-usage-options.md
+  - Code/API Docs: reference/
+#  - API Documentation:
+#    - language_models: api/language_models_base.md
+
+
+markdown_extensions:
+  - footnotes
+  - toc:
+      permalink: true
+  - attr_list
+  - md_in_html
+  - pymdownx.emoji:
+      emoji_index: !!python/name:material.extensions.emoji.twemoji
+      emoji_generator: !!python/name:material.extensions.emoji.to_svg
+  - admonition
+  - pymdownx.details
+  - pymdownx.superfences
+  - pymdownx.highlight:
+      anchor_linenums: true
+      line_spans: __span
+      pygments_lang_class: true
+      use_pygments: true
+  - pymdownx.inlinehilite
+  - pymdownx.snippets
+  - pymdownx.arithmatex:
+      generic: true
+  - markdown.extensions.attr_list:
+extra_javascript:
+  - javascripts/mathjax.js
+  - https://polyfill.io/v3/polyfill.min.js?features=es6
+  - https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-mml-chtml.js
 </file>
 
 <file path="langroid/agent/base.py">
@@ -50919,6 +51558,15 @@ oai_tool_id = list(id2result_.keys())[0]
 # from untrusted content (e.g. via get_tool_messages) are still
 # trusted here -- see issue #1035 for the taint-propagation fix.
 ⋮----
+# DISTRUST signal (#1035): set for any USER-origin response
+# (external user input -- create_user_response / to_ChatDocument
+# of a USER string), when the caller passes tainted=True, or when
+# the response repackages an already-tainted tool (e.g.
+# DonePassTool/AgentDoneTool re-emitting tools parsed from a USER
+# message). The Task result-wrap relabel builds ChatDocMetaData
+# directly (not via this template), so trusted agent->agent
+# handoffs are unaffected.
+⋮----
 """Template for user_response."""
 ⋮----
 def user_can_respond(self, msg: Optional[str | ChatDocument] = None) -> bool
@@ -50955,6 +51603,9 @@ sender = Entity.SYSTEM
 ⋮----
 source = Entity.USER
 sender = Entity.USER
+⋮----
+# interactive user input is external untrusted input; SYSTEM
+# (operator) input is trusted (#1035)
 ⋮----
 # preserve trail of tool_ids for OpenAI Assistant fn-calls
 ⋮----
@@ -51103,18 +51754,27 @@ def _tool_recipient_match(self, tool: ToolMessage) -> bool
         messages are returned unchanged, since their tools came from an LLM,
         not from raw user input.
 
-        Limitation: ``tools_from_agent`` is a message-origin signal and guards
-        only the *direct* case -- raw user input arriving at the agent that
-        receives it. It does NOT defend against an agent that deliberately
-        forwards/repackages untrusted user content into structured
-        ``tool_messages`` (e.g. an ``agent_response`` echoing ``msg.content``,
-        or ``DonePassTool``/``AgentDoneTool`` re-emitting tools parsed from a
-        USER message); such forwarding is the developer's responsibility. A
-        robust taint-propagation fix is tracked in issue #1035.
+        Defense in depth (#1035): external user input is marked
+        ``metadata.tainted`` (ChatDocument.from_str / to_ChatDocument), the mark
+        propagates through deepcopies and the ``DonePassTool``/``AgentDoneTool``
+        repackage path, and a tainted message has its handle-only tools dropped
+        here even when ``tools_from_agent`` is set and the sender was relabeled
+        to USER. This closes the known content-laundering path through those
+        orchestration tools.
+
+        Residual: taint cannot flow through an LLM generation, so an LLM that is
+        prompt-injected into emitting tool JSON in its *content* stays out of
+        scope (the LLM-trust boundary). Broadening taint to every mechanical
+        derivation is tracked in issue #1035.
 
         Non-``ChatDocument`` inputs and non-``USER`` senders are returned
         unchanged.
         """
+⋮----
+# Untrusted (USER-derived) content mechanically laundered into
+# structured tools -- e.g. DonePassTool/AgentDoneTool re-emitting
+# tools parsed from a USER message. Veto handle-only tools even when
+# tools_from_agent is set and the sender was relabeled to USER. (#1035)
 ⋮----
 # Tools were produced by an agent's LLM/handler (possibly relayed
 # across a multi-agent handoff), not raw user input -- safe to
@@ -51462,6 +52122,9 @@ ve.tool_class = message_class  # type: ignore
 ⋮----
 is_agent_author = author_entity == Entity.AGENT
 ⋮----
+# USER-author strings (e.g. Task.run user input) are tainted by
+# response_template (#1035).
+⋮----
 # result is a ToolMessage, so...
 result_tool_name = msg.default_value("request")
 ⋮----
@@ -51647,6 +52310,378 @@ agent_type = type(agent).__name__
 user_response = Prompt.ask(
 ⋮----
 answer = agent.llm_response(request)
+</file>
+
+<file path="langroid/agent/chat_document.py">
+class ChatDocAttachment(BaseModel)
+⋮----
+# any additional data that should be attached to the document
+model_config = ConfigDict(extra="allow")
+⋮----
+class StatusCode(str, Enum)
+⋮----
+"""Codes meant to be returned by task.run(). Some are not used yet."""
+⋮----
+OK = "OK"
+ERROR = "ERROR"
+DONE = "DONE"
+STALLED = "STALLED"
+INF_LOOP = "INF_LOOP"
+KILL = "KILL"
+FIXED_TURNS = "FIXED_TURNS"  # reached intended number of turns
+MAX_TURNS = "MAX_TURNS"  # hit max-turns limit
+MAX_COST = "MAX_COST"
+MAX_TOKENS = "MAX_TOKENS"
+TIMEOUT = "TIMEOUT"
+NO_ANSWER = "NO_ANSWER"
+USER_QUIT = "USER_QUIT"
+⋮----
+class ChatDocMetaData(DocMetaData)
+⋮----
+parent_id: str = ""  # msg (ChatDocument) to which this is a response
+child_id: str = ""  # ChatDocument that has response to this message
+agent_id: str = ""  # ChatAgent that generated this message
+msg_idx: int = -1  # index of this message in the agent `message_history`
+sender: Entity  # sender of the message
+# True if this msg was relayed from another agent's LLM/handler output in a
+# multi-agent handoff (a Task then relabels sender -> USER). Lets handle-only
+# tools be dispatched for legitimate handoffs while still blocking raw
+# USER-injected tool JSON. See ChatAgent._filter_user_origin_tools and
+# GHSA-gjgq-w2m6-wr5q.
+tools_from_agent: bool = False
+# True if this msg's content/tools derive from external untrusted (USER)
+# input via a MECHANICAL path: a deepcopy of a tainted msg, or tools
+# repackaged from a USER msg's content (e.g. DonePassTool/AgentDoneTool).
+# Unlike `tools_from_agent` (a trust signal), this is a DISTRUST signal that
+# vetoes handle-only tool dispatch even across a USER relabel, closing the
+# content-laundering hole. Propagated (deepcopy carries it), never cleared.
+# See ChatAgent._filter_user_origin_tools and issue #1035 (taint propagation).
+tainted: bool = False
+# tool_id corresponding to single tool result in ChatDocument.content
+oai_tool_id: str | None = None
+tool_ids: List[str] = []  # stack of tool_ids; used by OpenAIAssistant
+block: None | Entity = None
+sender_name: str = ""
+recipient: str = ""
+usage: Optional[LLMTokenUsage] = None
+cached: bool = False
+displayed: bool = False
+has_citation: bool = False
+status: Optional[StatusCode] = None
+⋮----
+@model_validator(mode="after")
+    def _mark_tools_from_agent(self) -> "ChatDocMetaData"
+⋮----
+# Mark messages produced directly by an LLM: the tools in an LLM's
+# output are the LLM's own decision (the trusted trigger for handle-only
+# tools -- see GHSA-gjgq-w2m6-wr5q), so the mark lets a Task relay them
+# to another agent even after relabeling the sender to USER. The mark is
+# only ever SET, never cleared, so it survives relabeling and deepcopies
+# (e.g. ForwardTool/PassTool deepcopy the LLM-born message, carrying the
+# mark across the handoff). We deliberately do NOT mark generic AGENT
+# messages: a pass-through/echoing agent could surface untrusted USER
+# text (with embedded tool JSON) as AGENT content, and marking that
+# would re-open the user-origin bypass. Raw USER input is never marked,
+# so it stays filtered. See ChatAgent._filter_user_origin_tools.
+⋮----
+@property
+    def parent(self) -> Optional["ChatDocument"]
+⋮----
+@property
+    def child(self) -> Optional["ChatDocument"]
+⋮----
+class ChatDocLoggerFields(BaseModel)
+⋮----
+sender_entity: Entity = Entity.USER
+⋮----
+block: Entity | None = None
+tool_type: str = ""
+tool: str = ""
+content: str = ""
+⋮----
+@classmethod
+    def tsv_header(cls) -> str
+⋮----
+field_names = cls().model_dump().keys()
+⋮----
+class ChatDocument(Document)
+⋮----
+"""
+    Represents a message in a conversation among agents. All responders of an agent
+    have signature ChatDocument -> ChatDocument (modulo None, str, etc),
+    and so does the Task.run() method.
+
+    Attributes:
+        oai_tool_calls (Optional[List[OpenAIToolCall]]):
+            Tool-calls from an OpenAI-compatible API
+        oai_tool_id2results (Optional[OrderedDict[str, str]]):
+            Results of tool-calls from OpenAI (dict is a map of tool_id -> result)
+        oai_tool_choice: ToolChoiceTypes | Dict[str, str]: Param controlling how the
+            LLM should choose tool-use in its response
+            (auto, none, required, or a specific tool)
+        function_call (Optional[LLMFunctionCall]):
+            Function-call from an OpenAI-compatible API
+                (deprecated by OpenAI, in favor of tool-calls)
+        tool_messages (List[ToolMessage]): Langroid ToolMessages extracted from
+            - `content` field (via JSON parsing),
+            - `oai_tool_calls`, or
+            - `function_call`
+        metadata (ChatDocMetaData): Metadata for the message, e.g. sender, recipient.
+        attachment (None | ChatDocAttachment): Any additional data attached.
+    """
+⋮----
+reasoning: str = ""  # reasoning produced by a reasoning LLM
+content_any: Any = None  # to hold arbitrary data returned by responders
+# Original LLM response text including inline thought signatures
+# (e.g. <thinking>...</thinking>). Only populated when reasoning was
+# extracted from inline tags in the message text. Used by to_LLMMessage()
+# to preserve thought signatures in message history, which is critical
+# for models like Gemini 3 Flash and Amazon Nova that rely on seeing
+# their own thought tags in context to maintain reasoning ability.
+content_with_reasoning: Optional[str] = None
+files: List[FileAttachment] = []  # list of file attachments
+oai_tool_calls: Optional[List[OpenAIToolCall]] = None
+oai_tool_id2result: Optional[OrderedDict[str, str]] = None
+oai_tool_choice: ToolChoiceTypes | Dict[str, Dict[str, str] | str] = "auto"
+function_call: Optional[LLMFunctionCall] = None
+# tools that are explicitly added by agent response/handler,
+# or tools recognized in the ChatDocument as handle-able tools
+tool_messages: List[ToolMessage] = []
+# all known tools in the msg that are in an agent's llm_tools_known list,
+# even if non-used/handled
+# (the list is populated by Agent.has_tool_message_attempt())
+all_tool_messages: Optional[List[ToolMessage]] = None
+# ID of the agent that populated all_tool_messages (for cache validity)
+all_tool_messages_agent_id: Optional[str] = None
+⋮----
+metadata: ChatDocMetaData
+attachment: None | ChatDocAttachment = None
+⋮----
+def __init__(self, **data: Any)
+⋮----
+@staticmethod
+    def deepcopy(doc: ChatDocument) -> ChatDocument
+⋮----
+new_doc = copy.deepcopy(doc)
+⋮----
+@staticmethod
+    def from_id(id: str) -> Optional["ChatDocument"]
+⋮----
+@staticmethod
+    def delete_id(id: str) -> None
+⋮----
+"""Remove ChatDocument with given id from ObjectRegistry,
+        and all its descendants.
+        """
+chat_doc = ChatDocument.from_id(id)
+# first delete all descendants
+⋮----
+next_chat_doc = chat_doc.child
+⋮----
+chat_doc = next_chat_doc
+⋮----
+def __str__(self) -> str
+⋮----
+fields = self.log_fields()
+tool_str = ""
+⋮----
+tool_str = f"{fields.tool_type}[{fields.tool}]: "
+recipient_str = ""
+⋮----
+recipient_str = f"=>{fields.recipient}: "
+⋮----
+def get_tool_names(self) -> List[str]
+⋮----
+"""
+        Get names of attempted tool usages (JSON or non-JSON) in the content
+            of the message.
+        Returns:
+            List[str]: list of *attempted* tool names
+            (We say "attempted" since we ONLY look at the `request` component of the
+            tool-call representation, and we're not fully parsing it into the
+            corresponding tool message class)
+
+        """
+tool_candidates = XMLToolMessage.find_candidates(self.content)
+⋮----
+tool_candidates = extract_top_level_json(self.content)
+⋮----
+tools = [json.loads(tc).get("request") for tc in tool_candidates]
+⋮----
+tool_dicts = [
+tools = [td.get("request") for td in tool_dicts if td is not None]
+⋮----
+def log_fields(self) -> ChatDocLoggerFields
+⋮----
+"""
+        Fields for logging in csv/tsv logger
+        Returns:
+            List[str]: list of fields
+        """
+tool_type = ""  # FUNC or TOOL
+tool = ""  # tool name or function name
+⋮----
+# Skip tool detection for system messages - they contain tool instructions,
+# not actual tool calls
+⋮----
+oai_tools = (
+⋮----
+tool_type = "FUNC"
+tool = self.function_call.name
+⋮----
+tool_type = "OAI_TOOL"
+tool = ",".join(t.function.name for t in oai_tools)  # type: ignore
+⋮----
+json_tools = self.get_tool_names()
+⋮----
+json_tools = []
+⋮----
+tool_type = "TOOL"
+tool = json_tools[0]
+recipient = self.metadata.recipient
+content = self.content
+sender_entity = self.metadata.sender
+sender_name = self.metadata.sender_name
+⋮----
+def tsv_str(self) -> str
+⋮----
+field_values = fields.model_dump().values()
+⋮----
+def pop_tool_ids(self) -> None
+⋮----
+"""
+        Pop the last tool_id from the stack of tool_ids.
+        """
+⋮----
+@staticmethod
+    def _clean_fn_call(fc: LLMFunctionCall | None) -> None
+⋮----
+# Sometimes an OpenAI LLM (esp gpt-4o) may generate a function-call
+# with oddities:
+# (a) the `name` is set, as well as `arguments.request` is set,
+#  and in langroid we use the `request` value as the `name`.
+#  In this case we override the `name` with the `request` value.
+# (b) the `name` looks like "functions blah" or just "functions"
+#   In this case we strip the "functions" part.
+⋮----
+request = fc.arguments.get("request")
+⋮----
+"""
+        Convert LLMResponse to ChatDocument.
+        Args:
+            response (LLMResponse): LLMResponse to convert.
+            displayed (bool): Whether this response was displayed to the user.
+            recognize_recipient_in_content (bool): Whether to parse message text
+                for recipient routing (``TO[<recipient>]:`` and JSON
+                ``{"recipient": ...}``). Default True.
+        Returns:
+            ChatDocument: ChatDocument representation of this LLMResponse.
+        """
+⋮----
+message = message.strip()
+⋮----
+message = ""
+⋮----
+# there must be at least one if it's not None
+⋮----
+@staticmethod
+    def from_str(msg: str) -> "ChatDocument"
+⋮----
+# first check whether msg is structured as TO <recipient>: <message>
+⋮----
+# check if any top level json specifies a 'recipient'
+recipient = top_level_json_field(msg, "recipient")
+message = msg  # retain the whole msg in this case
+⋮----
+tainted=True,  # external user input is untrusted (#1035)
+⋮----
+"""
+        Convert LLMMessage to ChatDocument.
+
+        Args:
+            message (LLMMessage): LLMMessage to convert.
+            sender_name (str): Name of the sender. Defaults to "".
+            recipient (str): Name of the recipient. Defaults to "".
+
+        Returns:
+            ChatDocument: ChatDocument representation of this LLMMessage.
+        """
+# Map LLMMessage Role to ChatDocument Entity
+role_to_entity = {
+⋮----
+sender_entity = role_to_entity.get(message.role, Entity.USER)
+⋮----
+"""
+        Convert to list of LLMMessage, to incorporate into msg-history sent to LLM API.
+        Usually there will be just a single LLMMessage, but when the ChatDocument
+        contains results from multiple OpenAI tool-calls, we would have a sequence
+        LLMMessages, one per tool-call result.
+
+        Args:
+            message (str|ChatDocument): Message to convert.
+            oai_tools (Optional[List[OpenAIToolCall]]): Tool-calls currently awaiting
+                response, from the ChatAgent's latest message.
+        Returns:
+            List[LLMMessage]: list of LLMMessages corresponding to this ChatDocument.
+        """
+⋮----
+sender_role = Role.USER
+⋮----
+message = ChatDocument.from_str(message)
+# Prefer content_with_reasoning when available — this preserves
+# inline thought signatures (e.g. <thinking>...</thinking>) in
+# message history, which certain models (Gemini 3 Flash, Amazon
+# Nova) need to maintain reasoning across turns.
+# content_with_reasoning is only set when inline tags were
+# actually extracted, so this won't interfere with models that
+# provide reasoning via a separate API field.
+content = (
+fun_call = message.function_call
+oai_tool_calls = message.oai_tool_calls
+⋮----
+# This may happen when a (parent agent's) LLM generates a
+# a Function-call, and it ends up being sent to the current task's
+# LLM (possibly because the function-call is mis-named or has other
+# issues and couldn't be handled by handler methods).
+# But a function-call can only be generated by an entity with
+# Role.ASSISTANT, so we instead put the content of the function-call
+# in the content of the message.
+⋮----
+fun_call = None
+⋮----
+# same reasoning as for function-call above
+⋮----
+oai_tool_calls = None
+# some LLM APIs (e.g. gemini) don't like empty msg
+content = content or " "
+sender_name = message.metadata.sender_name
+tool_ids = message.metadata.tool_ids
+tool_id = tool_ids[-1] if len(tool_ids) > 0 else ""
+chat_document_id = message.id()
+⋮----
+sender_role = Role.SYSTEM
+⋮----
+# This is a response to a function call, so set the role to FUNCTION.
+sender_role = Role.FUNCTION
+sender_name = message.metadata.parent.function_call.name
+⋮----
+pending_tool_ids = [tc.id for tc in oai_tools]
+# The ChatAgent has pending OpenAI tool-call(s),
+# so the current ChatDocument contains
+# results for some/all/none of them.
+⋮----
+# Case 1:
+# There was exactly 1 pending tool-call, and in this case
+# the result would be a plain string in `content`
+⋮----
+# Case 2:
+# ChatDocument.content has result of a single tool-call
+⋮----
+# There were > 1 tool-calls awaiting response,
+⋮----
+sender_role = Role.ASSISTANT
+⋮----
+tool_id=tool_id,  # for OpenAI Assistant
 </file>
 
 <file path="langroid/agent/task.py">
@@ -52048,6 +53083,8 @@ def init(self, msg: None | str | ChatDocument = None) -> ChatDocument | None
             Currently not used in the code, but provided for convenience.
         """
 ⋮----
+# external user input -> untrusted (#1035)
+⋮----
 # if agent has a history beyond system msg, set the
 # pending message to the ChatDocument linked from
 # last message in the history
@@ -52058,6 +53095,12 @@ last_agent_msg = self.agent.message_history[-1]
 original_parent_id = msg.metadata.parent_id
 ⋮----
 # Preserve the parent pointer from the original message
+⋮----
+# A USER-origin ChatDocument handed to a ROOT task (caller is
+# None) is external untrusted input (e.g. Task.run(ChatDocument(
+# sender=USER, ...))) that bypassed the tainting constructors --
+# taint it. Sub-task inputs (caller is not None, relabeled to
+# USER just below) keep their propagated taint; we only set. #1035
 ⋮----
 # msg may have come from `caller`, so we pretend this is from
 # the CURRENT task's USER entity
@@ -52535,6 +53578,9 @@ result_doc = ChatDocument(
 # is untrusted text that happens to contain tool JSON), which
 # must stay filtered (GHSA-gjgq-w2m6-wr5q; see also #1035).
 ⋮----
+# Propagate the DISTRUST mark across the USER relabel so laundered
+# (USER-derived) tools stay vetoed at the parent agent (#1035).
+⋮----
 def _is_empty_message(self, msg: str | ChatDocument | None) -> bool
 ⋮----
 """
@@ -52890,1000 +53936,6 @@ responder = current_responder
 matched = False
 ⋮----
 matched = True
-</file>
-
-<file path="langroid/agent/special/sql/sql_chat_agent.py">
-"""
-Agent that allows interaction with an SQL database using SQLAlchemy library.
-The agent can execute SQL queries in the database and return the result.
-
-Functionality includes:
-- adding table and column context
-- asking a question about a SQL schema
-"""
-⋮----
-# sqlglot is required for the statement-type allowlist enforced in
-# `_validate_query`. Importing it at module load ensures the security
-# guarantee cannot be silently bypassed by a partial/stale install.
-⋮----
-logger = logging.getLogger(__name__)
-⋮----
-console = Console()
-⋮----
-DEFAULT_SQL_CHAT_SYSTEM_MESSAGE = """
-⋮----
-ADDRESSING_INSTRUCTION = """
-⋮----
-DONE_INSTRUCTION = f"""
-⋮----
-SQL_ERROR_MSG = "There was an error in your SQL Query"
-⋮----
-# Dialect-specific SQL patterns that enable code execution, arbitrary file
-# access, or other escapes from the database engine. Matched against the raw
-# query text (case-insensitive) as a defense-in-depth layer in addition to the
-# sqlglot-based statement-type allowlist.
-_DANGEROUS_SQL_PATTERNS: List["re.Pattern[str]"] = [
-⋮----
-# PostgreSQL: COPY ... FROM/TO PROGRAM executes shell commands as the DB
-# server OS user.
-⋮----
-# PostgreSQL server-side filesystem / log / WAL access. Match the whole
-# pg_read*, pg_stat*, pg_ls*, pg_current_logfile family rather than naming
-# individual functions: near-name functions (pg_read_file vs
-# pg_read_server_file, pg_ls_logdir vs pg_ls_dir, pg_stat_file, ...) all
-# yield the same file/metadata disclosure primitive.
-⋮----
-# MySQL/MariaDB filesystem
-⋮----
-# SQLite: load_extension enables loading arbitrary shared objects;
-# ATTACH can read/write arbitrary files. The DATABASE keyword is optional
-# per the SQLite grammar (ATTACH [DATABASE] expr AS schema-name), so match
-# both forms.
-⋮----
-# SQL Server: command execution, OLE automation, and ad-hoc external data
-# sources (OPENDATASOURCE is the connection-string counterpart of
-# OPENROWSET; both can read remote/UNC files).
-⋮----
-# Generic: stored-program creation and procedural language extensions.
-# LANGUAGE / RULE / EVENT TRIGGER / FOREIGN TABLE are additional PostgreSQL
-# primitives that can register attacker-controlled code.
-⋮----
-# AST-side blocklist of dangerous SQL function names, applied after sqlglot
-# parses the query. The raw-text regex above can be bypassed by quoted
-# identifiers, inline comments, or schema qualification -- e.g.
-# `"pg_read_file"(...)`, `pg_read_file/**/(...)`,
-# `pg_catalog."pg_read_file"(...)` -- but sqlglot normalizes all those forms
-# to the same function-call node, so a name-based check on the parsed tree
-# catches every variant (GHSA-6xc5-4r68-67fc).
-_DANGEROUS_FUNCTION_NAMES: FrozenSet[str] = frozenset(
-⋮----
-"load_file",  # MySQL/MariaDB filesystem read
-"load_extension",  # SQLite extension loader
-"sp_oacreate",  # MSSQL OLE automation
-"sp_oamethod",  # MSSQL OLE automation
-⋮----
-# Prefix families: any function whose normalized name starts with one of these
-# is considered dangerous. Mirrors the `\bpg_(read|stat|ls|current_logfile)...`
-# and `\blo_(import|export)\b` regex coverage, but on the parsed AST.
-_DANGEROUS_FUNCTION_PREFIXES: Tuple[str, ...] = (
-⋮----
-def _is_dangerous_function_name(name: str) -> bool
-⋮----
-"""True if `name` (case-folded, unquoted) is a dangerous SQL function."""
-⋮----
-def _called_function_names(stmt: Any) -> Iterator[str]
-⋮----
-"""Yield normalized (case-folded, unquoted, schema-stripped) names of
-    every function-call node in `stmt` (a parsed sqlglot expression)."""
-⋮----
-this = node.this
-⋮----
-name = this.name
-⋮----
-name = str(this) if this is not None else ""
-⋮----
-# Typed sqlglot Func subclass: its class key is the SQL keyword.
-name = getattr(type(node), "key", "") or ""
-# Strip any schema qualifier that leaked into the name string.
-name = name.rsplit(".", 1)[-1].strip().lower()
-⋮----
-# Default set of SQL statement types the agent is allowed to execute when
-# `allow_dangerous_operations` is False. SELECT-only is safe for Q&A workloads.
-_DEFAULT_ALLOWED_STATEMENTS: List[str] = ["SELECT"]
-⋮----
-class SQLChatAgentConfig(ChatAgentConfig)
-⋮----
-system_message: str = DEFAULT_SQL_CHAT_SYSTEM_MESSAGE
-user_message: None | str = None
-cache: bool = True  # cache results
-debug: bool = False
-use_helper: bool = True
-is_helper: bool = False
-stream: bool = True  # allow streaming where needed
-database_uri: str = ""  # Database URI
-database_session: None | Session = None  # Database session
-vecdb: None | VectorStoreConfig = None
-context_descriptions: Dict[str, Dict[str, Union[str, Dict[str, str]]]] = {}
-use_schema_tools: bool = False
-multi_schema: bool = False
-# whether the agent is used in a continuous chat with user,
-# as opposed to returning a result from the task.run()
-chat_mode: bool = False
-addressing_prefix: str = ""
-max_result_rows: int | None = None  # limit query results to this
-max_retained_tokens: int | None = None  # limit history of query results to this
-⋮----
-# --- Security controls (see CVE-2026-25879) ---------------------------
-# By default, the agent only executes SELECT statements and rejects any
-# query that matches a known dangerous pattern (e.g. PostgreSQL
-# `COPY ... FROM PROGRAM`, MySQL `INTO OUTFILE`, SQLite `load_extension`,
-# MSSQL `xp_cmdshell`). The LLM-generated SQL is influenceable by prompt
-# injection — including injection via data the LLM reads back from the
-# database — so executing it without restrictions is unsafe when the DB
-# role has elevated privileges.
-#
-# To enable writes: extend allowed_statement_types, e.g. ["SELECT",
-# "INSERT", "UPDATE", "DELETE"]. To disable all checks (only do this with
-# a least-privilege DB role and trusted prompts): set
-# allow_dangerous_operations=True.
-allowed_statement_types: List[str] = list(_DEFAULT_ALLOWED_STATEMENTS)
-allow_dangerous_operations: bool = False
-⋮----
-"""
-    Optional, but strongly recommended, context descriptions for tables, columns, 
-    and relationships. It should be a dictionary where each key is a table name 
-    and its value is another dictionary. 
-
-    In this inner dictionary:
-    - The 'description' key corresponds to a string description of the table.
-    - The 'columns' key corresponds to another dictionary where each key is a 
-    column name and its value is a string description of that column.
-    - The 'relationships' key corresponds to another dictionary where each key 
-    is another table name and the value is a description of the relationship to 
-    that table.
-
-    If multi_schema support is enabled, the tables names in the description
-    should be of the form 'schema_name.table_name'.
-
-    For example:
-    {
-        'table1': {
-            'description': 'description of table1',
-            'columns': {
-                'column1': 'description of column1 in table1',
-                'column2': 'description of column2 in table1'
-            }
-        },
-        'table2': {
-            'description': 'description of table2',
-            'columns': {
-                'column3': 'description of column3 in table2',
-                'column4': 'description of column4 in table2'
-            }
-        }
-    }
-    """
-⋮----
-class SQLChatAgent(ChatAgent)
-⋮----
-"""
-    Agent for chatting with a SQL database
-    """
-⋮----
-used_run_query: bool = False
-llm_responded: bool = False
-⋮----
-def __init__(self, config: "SQLChatAgentConfig") -> None
-⋮----
-"""Initialize the SQLChatAgent.
-
-        Raises:
-            ValueError: If database information is not provided in the config.
-        """
-⋮----
-# Caution - this updates the self.config.system_message!
-⋮----
-# helper_config.system_message is now the fully-populated sys msg of
-# the main SQLAgent.
-⋮----
-def _validate_config(self, config: "SQLChatAgentConfig") -> None
-⋮----
-"""Validate the configuration to ensure all necessary fields are present."""
-⋮----
-def _init_database(self) -> None
-⋮----
-"""Initialize the database engine and session."""
-⋮----
-def _init_metadata(self) -> None
-⋮----
-"""Initialize the database metadata."""
-⋮----
-inspector = inspect(self.engine)
-⋮----
-metadata = MetaData(schema=schema)
-⋮----
-def _init_table_metadata(self) -> None
-⋮----
-"""Initialize metadata for the tables present in the database."""
-⋮----
-def _init_system_message(self) -> None
-⋮----
-"""Initialize the system message."""
-message = self._format_message()
-⋮----
-allowed = sorted(
-⋮----
-def _init_tools(self) -> None
-⋮----
-"""Initialize sys msg and tools."""
-# Create a custom RunQueryTool class with the desired max_retained_tokens
-⋮----
-class CustomRunQueryTool(RunQueryTool)
-⋮----
-_max_retained_tokens = self.config.max_retained_tokens
-⋮----
-def _format_message(self) -> str
-⋮----
-"""Format the system message based on the engine and table metadata."""
-⋮----
-def _enable_schema_tools(self) -> None
-⋮----
-"""Enable tools for schema-related functionalities."""
-⋮----
-def _clarify_answer_instruction(self) -> str
-⋮----
-"""
-        Prompt to use when asking LLM to clarify intent of
-        an already-generated response
-        """
-⋮----
-def _clarifying_message(self) -> str
-⋮----
-tools_instruction = f"""
-⋮----
-"""
-        We'd end up here if the current msg has no tool.
-        If this is from LLM, we may need to handle the scenario where
-        it may have "forgotten" to generate a tool.
-        """
-⋮----
-# send any Non-tool msg to the user
-⋮----
-# Agent intent not clear => use the helper agent to
-# do what this agent should have done, e.g. generate tool, etc.
-# This is likelier to succeed since this agent has no "baggage" of
-# prior conversation, other than the system msg, and special
-# "Intent-interpretation" instructions.
-⋮----
-AnyTool = self._get_any_tool_message(optional=False)
-⋮----
-recovery_message = self._strict_recovery_instructions(
-result = self.llm_response(recovery_message)
-# remove the recovery_message (it has User role) from the chat history,
-# else it may cause the LLM to directly use the AnyTool.
-self.delete_last_message(role=Role.USER)  # delete last User-role msg
-⋮----
-response = self.helper_agent.llm_response(message)
-tools = self.try_get_tool_messages(response)
-⋮----
-# fall back on the clarification message
-⋮----
-def retry_query(self, e: Exception, query: str) -> str
-⋮----
-"""
-        Generate an error message for a failed SQL query and return it.
-
-        Parameters:
-        e (Exception): The exception raised during the SQL query execution.
-        query (str): The SQL query that failed.
-
-        Returns:
-        str: The error message.
-        """
-⋮----
-# Optional part to be included based on `use_schema_tools`
-optional_schema_description = ""
-⋮----
-optional_schema_description = f"""\
-⋮----
-# Construct the error message
-error_message_template = f"""\
-⋮----
-def _available_tool_names(self) -> str
-⋮----
-def _tool_result_llm_answer_prompt(self) -> str
-⋮----
-"""
-        Prompt to use at end of tool result,
-        to guide LLM, for the case where it wants to answer the user's query
-        """
-⋮----
-def _sqlglot_dialect(self) -> Optional[str]
-⋮----
-"""Map the SQLAlchemy dialect name to a sqlglot dialect name."""
-⋮----
-name: str = str(self.engine.dialect.name)
-# sqlglot uses 'postgres', not 'postgresql'; 'tsql' for MSSQL.
-mapping: Dict[str, str] = {"postgresql": "postgres", "mssql": "tsql"}
-⋮----
-def _validate_query(self, query: str) -> Optional[str]
-⋮----
-"""
-        Check whether `query` is permitted under the agent's security config.
-
-        Returns None if the query may be executed, otherwise an error message
-        explaining why it was rejected (to be relayed to the LLM).
-        """
-⋮----
-allowed = {t.strip().upper() for t in self.config.allowed_statement_types}
-⋮----
-statements = sqlglot.parse(query, read=self._sqlglot_dialect())
-⋮----
-kind_map = {
-⋮----
-kind = next(
-⋮----
-# AST-side dangerous-function check: catches calls that evaded
-# `_DANGEROUS_SQL_PATTERNS` via quoted identifiers, inline comments,
-# or schema qualification (GHSA-6xc5-4r68-67fc).
-⋮----
-def run_query(self, msg: RunQueryTool) -> str
-⋮----
-"""
-        Handle a RunQueryTool message by executing a SQL query and returning the result.
-
-        Args:
-            msg (RunQueryTool): The tool-message to handle.
-
-        Returns:
-            str: The result of executing the SQL query.
-        """
-query = msg.query
-session = self.Session
-⋮----
-rejection = self._validate_query(query)
-⋮----
-query_result = session.execute(text(query))
-⋮----
-# attempt to fetch results: should work for normal SELECT queries
-rows = query_result.fetchall()
-n_rows = len(rows)
-⋮----
-rows = rows[: self.config.max_result_rows]
-⋮----
-response_message = self._format_rows(rows)
-⋮----
-# If we get here, it's a non-SELECT query (UPDATE, INSERT, DELETE)
-affected_rows = query_result.rowcount  # type: ignore
-response_message = f"""
-⋮----
-response_message = self.retry_query(e, query)
-⋮----
-final_message = f"""
-⋮----
-def _format_rows(self, rows: Sequence[Row[Any]]) -> str
-⋮----
-"""
-        Format the rows fetched from the query result into a string.
-
-        Args:
-            rows (list): List of rows fetched from the query result.
-
-        Returns:
-            str: Formatted string representation of rows.
-        """
-# TODO: UPDATE FORMATTING
-⋮----
-def get_table_names(self, msg: GetTableNamesTool) -> str
-⋮----
-"""
-        Handle a GetTableNamesTool message by returning the names of all tables in the
-        database.
-
-        Returns:
-            str: The names of all tables in the database.
-        """
-⋮----
-table_names = [", ".join(md.tables.keys()) for md in self.metadata]
-⋮----
-def get_table_schema(self, msg: GetTableSchemaTool) -> str
-⋮----
-"""
-        Handle a GetTableSchemaTool message by returning the schema of all provided
-        tables in the database.
-
-        Returns:
-            str: The schema of all provided tables in the database.
-        """
-tables = msg.tables
-result = ""
-⋮----
-table = self.table_metadata.get(table_name)
-⋮----
-def get_column_descriptions(self, msg: GetColumnDescriptionsTool) -> str
-⋮----
-"""
-        Handle a GetColumnDescriptionsTool message by returning the descriptions of all
-        provided columns from the database.
-
-        Returns:
-            str: The descriptions of all provided columns from the database.
-        """
-table = msg.table
-columns = msg.columns.split(", ")
-result = f"\nTABLE: {table}"
-descriptions = self.config.context_descriptions.get(table)
-⋮----
-result += f"\n{col} => {descriptions['columns'][col]}"  # type: ignore
-⋮----
-class SQLHelperAgent(SQLChatAgent)
-⋮----
-"""Set up helper sys msg"""
-⋮----
-# Note that self.config.system_message is already set to the
-# parent SQLAgent's system_message
-⋮----
-# note that the initial msg in chat history will contain:
-# - system message
-# - tool instructions
-# so the final_instructions will be at the end of this initial msg
-⋮----
-message_str = message if isinstance(message, str) else message.content
-instruc_msg = f"""
-# user response_forget to avoid accumulating the chat history
-</file>
-
-<file path="langroid/agent/chat_document.py">
-class ChatDocAttachment(BaseModel)
-⋮----
-# any additional data that should be attached to the document
-model_config = ConfigDict(extra="allow")
-⋮----
-class StatusCode(str, Enum)
-⋮----
-"""Codes meant to be returned by task.run(). Some are not used yet."""
-⋮----
-OK = "OK"
-ERROR = "ERROR"
-DONE = "DONE"
-STALLED = "STALLED"
-INF_LOOP = "INF_LOOP"
-KILL = "KILL"
-FIXED_TURNS = "FIXED_TURNS"  # reached intended number of turns
-MAX_TURNS = "MAX_TURNS"  # hit max-turns limit
-MAX_COST = "MAX_COST"
-MAX_TOKENS = "MAX_TOKENS"
-TIMEOUT = "TIMEOUT"
-NO_ANSWER = "NO_ANSWER"
-USER_QUIT = "USER_QUIT"
-⋮----
-class ChatDocMetaData(DocMetaData)
-⋮----
-parent_id: str = ""  # msg (ChatDocument) to which this is a response
-child_id: str = ""  # ChatDocument that has response to this message
-agent_id: str = ""  # ChatAgent that generated this message
-msg_idx: int = -1  # index of this message in the agent `message_history`
-sender: Entity  # sender of the message
-# True if this msg was relayed from another agent's LLM/handler output in a
-# multi-agent handoff (a Task then relabels sender -> USER). Lets handle-only
-# tools be dispatched for legitimate handoffs while still blocking raw
-# USER-injected tool JSON. See ChatAgent._filter_user_origin_tools and
-# GHSA-gjgq-w2m6-wr5q.
-tools_from_agent: bool = False
-# tool_id corresponding to single tool result in ChatDocument.content
-oai_tool_id: str | None = None
-tool_ids: List[str] = []  # stack of tool_ids; used by OpenAIAssistant
-block: None | Entity = None
-sender_name: str = ""
-recipient: str = ""
-usage: Optional[LLMTokenUsage] = None
-cached: bool = False
-displayed: bool = False
-has_citation: bool = False
-status: Optional[StatusCode] = None
-⋮----
-@model_validator(mode="after")
-    def _mark_tools_from_agent(self) -> "ChatDocMetaData"
-⋮----
-# Mark messages produced directly by an LLM: the tools in an LLM's
-# output are the LLM's own decision (the trusted trigger for handle-only
-# tools -- see GHSA-gjgq-w2m6-wr5q), so the mark lets a Task relay them
-# to another agent even after relabeling the sender to USER. The mark is
-# only ever SET, never cleared, so it survives relabeling and deepcopies
-# (e.g. ForwardTool/PassTool deepcopy the LLM-born message, carrying the
-# mark across the handoff). We deliberately do NOT mark generic AGENT
-# messages: a pass-through/echoing agent could surface untrusted USER
-# text (with embedded tool JSON) as AGENT content, and marking that
-# would re-open the user-origin bypass. Raw USER input is never marked,
-# so it stays filtered. See ChatAgent._filter_user_origin_tools.
-⋮----
-@property
-    def parent(self) -> Optional["ChatDocument"]
-⋮----
-@property
-    def child(self) -> Optional["ChatDocument"]
-⋮----
-class ChatDocLoggerFields(BaseModel)
-⋮----
-sender_entity: Entity = Entity.USER
-⋮----
-block: Entity | None = None
-tool_type: str = ""
-tool: str = ""
-content: str = ""
-⋮----
-@classmethod
-    def tsv_header(cls) -> str
-⋮----
-field_names = cls().model_dump().keys()
-⋮----
-class ChatDocument(Document)
-⋮----
-"""
-    Represents a message in a conversation among agents. All responders of an agent
-    have signature ChatDocument -> ChatDocument (modulo None, str, etc),
-    and so does the Task.run() method.
-
-    Attributes:
-        oai_tool_calls (Optional[List[OpenAIToolCall]]):
-            Tool-calls from an OpenAI-compatible API
-        oai_tool_id2results (Optional[OrderedDict[str, str]]):
-            Results of tool-calls from OpenAI (dict is a map of tool_id -> result)
-        oai_tool_choice: ToolChoiceTypes | Dict[str, str]: Param controlling how the
-            LLM should choose tool-use in its response
-            (auto, none, required, or a specific tool)
-        function_call (Optional[LLMFunctionCall]):
-            Function-call from an OpenAI-compatible API
-                (deprecated by OpenAI, in favor of tool-calls)
-        tool_messages (List[ToolMessage]): Langroid ToolMessages extracted from
-            - `content` field (via JSON parsing),
-            - `oai_tool_calls`, or
-            - `function_call`
-        metadata (ChatDocMetaData): Metadata for the message, e.g. sender, recipient.
-        attachment (None | ChatDocAttachment): Any additional data attached.
-    """
-⋮----
-reasoning: str = ""  # reasoning produced by a reasoning LLM
-content_any: Any = None  # to hold arbitrary data returned by responders
-# Original LLM response text including inline thought signatures
-# (e.g. <thinking>...</thinking>). Only populated when reasoning was
-# extracted from inline tags in the message text. Used by to_LLMMessage()
-# to preserve thought signatures in message history, which is critical
-# for models like Gemini 3 Flash and Amazon Nova that rely on seeing
-# their own thought tags in context to maintain reasoning ability.
-content_with_reasoning: Optional[str] = None
-files: List[FileAttachment] = []  # list of file attachments
-oai_tool_calls: Optional[List[OpenAIToolCall]] = None
-oai_tool_id2result: Optional[OrderedDict[str, str]] = None
-oai_tool_choice: ToolChoiceTypes | Dict[str, Dict[str, str] | str] = "auto"
-function_call: Optional[LLMFunctionCall] = None
-# tools that are explicitly added by agent response/handler,
-# or tools recognized in the ChatDocument as handle-able tools
-tool_messages: List[ToolMessage] = []
-# all known tools in the msg that are in an agent's llm_tools_known list,
-# even if non-used/handled
-# (the list is populated by Agent.has_tool_message_attempt())
-all_tool_messages: Optional[List[ToolMessage]] = None
-# ID of the agent that populated all_tool_messages (for cache validity)
-all_tool_messages_agent_id: Optional[str] = None
-⋮----
-metadata: ChatDocMetaData
-attachment: None | ChatDocAttachment = None
-⋮----
-def __init__(self, **data: Any)
-⋮----
-@staticmethod
-    def deepcopy(doc: ChatDocument) -> ChatDocument
-⋮----
-new_doc = copy.deepcopy(doc)
-⋮----
-@staticmethod
-    def from_id(id: str) -> Optional["ChatDocument"]
-⋮----
-@staticmethod
-    def delete_id(id: str) -> None
-⋮----
-"""Remove ChatDocument with given id from ObjectRegistry,
-        and all its descendants.
-        """
-chat_doc = ChatDocument.from_id(id)
-# first delete all descendants
-⋮----
-next_chat_doc = chat_doc.child
-⋮----
-chat_doc = next_chat_doc
-⋮----
-def __str__(self) -> str
-⋮----
-fields = self.log_fields()
-tool_str = ""
-⋮----
-tool_str = f"{fields.tool_type}[{fields.tool}]: "
-recipient_str = ""
-⋮----
-recipient_str = f"=>{fields.recipient}: "
-⋮----
-def get_tool_names(self) -> List[str]
-⋮----
-"""
-        Get names of attempted tool usages (JSON or non-JSON) in the content
-            of the message.
-        Returns:
-            List[str]: list of *attempted* tool names
-            (We say "attempted" since we ONLY look at the `request` component of the
-            tool-call representation, and we're not fully parsing it into the
-            corresponding tool message class)
-
-        """
-tool_candidates = XMLToolMessage.find_candidates(self.content)
-⋮----
-tool_candidates = extract_top_level_json(self.content)
-⋮----
-tools = [json.loads(tc).get("request") for tc in tool_candidates]
-⋮----
-tool_dicts = [
-tools = [td.get("request") for td in tool_dicts if td is not None]
-⋮----
-def log_fields(self) -> ChatDocLoggerFields
-⋮----
-"""
-        Fields for logging in csv/tsv logger
-        Returns:
-            List[str]: list of fields
-        """
-tool_type = ""  # FUNC or TOOL
-tool = ""  # tool name or function name
-⋮----
-# Skip tool detection for system messages - they contain tool instructions,
-# not actual tool calls
-⋮----
-oai_tools = (
-⋮----
-tool_type = "FUNC"
-tool = self.function_call.name
-⋮----
-tool_type = "OAI_TOOL"
-tool = ",".join(t.function.name for t in oai_tools)  # type: ignore
-⋮----
-json_tools = self.get_tool_names()
-⋮----
-json_tools = []
-⋮----
-tool_type = "TOOL"
-tool = json_tools[0]
-recipient = self.metadata.recipient
-content = self.content
-sender_entity = self.metadata.sender
-sender_name = self.metadata.sender_name
-⋮----
-def tsv_str(self) -> str
-⋮----
-field_values = fields.model_dump().values()
-⋮----
-def pop_tool_ids(self) -> None
-⋮----
-"""
-        Pop the last tool_id from the stack of tool_ids.
-        """
-⋮----
-@staticmethod
-    def _clean_fn_call(fc: LLMFunctionCall | None) -> None
-⋮----
-# Sometimes an OpenAI LLM (esp gpt-4o) may generate a function-call
-# with oddities:
-# (a) the `name` is set, as well as `arguments.request` is set,
-#  and in langroid we use the `request` value as the `name`.
-#  In this case we override the `name` with the `request` value.
-# (b) the `name` looks like "functions blah" or just "functions"
-#   In this case we strip the "functions" part.
-⋮----
-request = fc.arguments.get("request")
-⋮----
-"""
-        Convert LLMResponse to ChatDocument.
-        Args:
-            response (LLMResponse): LLMResponse to convert.
-            displayed (bool): Whether this response was displayed to the user.
-            recognize_recipient_in_content (bool): Whether to parse message text
-                for recipient routing (``TO[<recipient>]:`` and JSON
-                ``{"recipient": ...}``). Default True.
-        Returns:
-            ChatDocument: ChatDocument representation of this LLMResponse.
-        """
-⋮----
-message = message.strip()
-⋮----
-message = ""
-⋮----
-# there must be at least one if it's not None
-⋮----
-@staticmethod
-    def from_str(msg: str) -> "ChatDocument"
-⋮----
-# first check whether msg is structured as TO <recipient>: <message>
-⋮----
-# check if any top level json specifies a 'recipient'
-recipient = top_level_json_field(msg, "recipient")
-message = msg  # retain the whole msg in this case
-⋮----
-"""
-        Convert LLMMessage to ChatDocument.
-
-        Args:
-            message (LLMMessage): LLMMessage to convert.
-            sender_name (str): Name of the sender. Defaults to "".
-            recipient (str): Name of the recipient. Defaults to "".
-
-        Returns:
-            ChatDocument: ChatDocument representation of this LLMMessage.
-        """
-# Map LLMMessage Role to ChatDocument Entity
-role_to_entity = {
-⋮----
-sender_entity = role_to_entity.get(message.role, Entity.USER)
-⋮----
-"""
-        Convert to list of LLMMessage, to incorporate into msg-history sent to LLM API.
-        Usually there will be just a single LLMMessage, but when the ChatDocument
-        contains results from multiple OpenAI tool-calls, we would have a sequence
-        LLMMessages, one per tool-call result.
-
-        Args:
-            message (str|ChatDocument): Message to convert.
-            oai_tools (Optional[List[OpenAIToolCall]]): Tool-calls currently awaiting
-                response, from the ChatAgent's latest message.
-        Returns:
-            List[LLMMessage]: list of LLMMessages corresponding to this ChatDocument.
-        """
-⋮----
-sender_role = Role.USER
-⋮----
-message = ChatDocument.from_str(message)
-# Prefer content_with_reasoning when available — this preserves
-# inline thought signatures (e.g. <thinking>...</thinking>) in
-# message history, which certain models (Gemini 3 Flash, Amazon
-# Nova) need to maintain reasoning across turns.
-# content_with_reasoning is only set when inline tags were
-# actually extracted, so this won't interfere with models that
-# provide reasoning via a separate API field.
-content = (
-fun_call = message.function_call
-oai_tool_calls = message.oai_tool_calls
-⋮----
-# This may happen when a (parent agent's) LLM generates a
-# a Function-call, and it ends up being sent to the current task's
-# LLM (possibly because the function-call is mis-named or has other
-# issues and couldn't be handled by handler methods).
-# But a function-call can only be generated by an entity with
-# Role.ASSISTANT, so we instead put the content of the function-call
-# in the content of the message.
-⋮----
-fun_call = None
-⋮----
-# same reasoning as for function-call above
-⋮----
-oai_tool_calls = None
-# some LLM APIs (e.g. gemini) don't like empty msg
-content = content or " "
-sender_name = message.metadata.sender_name
-tool_ids = message.metadata.tool_ids
-tool_id = tool_ids[-1] if len(tool_ids) > 0 else ""
-chat_document_id = message.id()
-⋮----
-sender_role = Role.SYSTEM
-⋮----
-# This is a response to a function call, so set the role to FUNCTION.
-sender_role = Role.FUNCTION
-sender_name = message.metadata.parent.function_call.name
-⋮----
-pending_tool_ids = [tc.id for tc in oai_tools]
-# The ChatAgent has pending OpenAI tool-call(s),
-# so the current ChatDocument contains
-# results for some/all/none of them.
-⋮----
-# Case 1:
-# There was exactly 1 pending tool-call, and in this case
-# the result would be a plain string in `content`
-⋮----
-# Case 2:
-# ChatDocument.content has result of a single tool-call
-⋮----
-# There were > 1 tool-calls awaiting response,
-⋮----
-sender_role = Role.ASSISTANT
-⋮----
-tool_id=tool_id,  # for OpenAI Assistant
-</file>
-
-<file path="mkdocs.yml">
-site_name: "langroid"
-repo_name: langroid/langroid
-site_description: "Langroid LLM App Development Framework"
-repo_url: https://github.com/langroid/langroid
-site_url: https://langroid.github.io/langroid
-
-edit_uri: ""
-extra_css:
-  - stylesheets/extra.css
-
-theme:
-  logo: assets/orange-logo-lambda-563.png
-  favicon: assets/orange-logo-lambda-563.png
-  features:
-    - navigation.tabs
-#    - navigation.tracking
-#    - navigation.sections
-#    - navigation.indexes
-    - toc
-    - content.code.copy
-    - content.code.select
-    - content.code.annotate
-  icon:
-      repo: fontawesome/brands/github
-  name: material
-  custom_dir: docs/overrides
-  palette:
-    # Palette toggle for light mode
-    - scheme: default
-      primary: indigo
-      accent: indigo
-      toggle:
-        icon: material/brightness-7
-        name: Switch to dark mode
-
-    # Palette toggle for dark mode
-    - scheme: slate
-      primary: indigo
-      accent: indigo
-      toggle:
-        icon: material/brightness-4
-        name: Switch to light mode
-
-plugins:
-  - blog:
-      archive: false
-      blog_toc: true
-      categories: false
-      blog_dir: blog
-
-  - rss:
-      enabled: true
-      match_path: blog/posts/.*
-      image: https://upload.wikimedia.org/wikipedia/commons/thumb/4/43/Feed-icon.svg/128px-Feed-icon.svg.png
-      date_from_meta:
-        as_creation: date
-      categories:
-        - categories
-        - tags
-  - search
-  - autorefs
-  #- awesome-pages
-  - gen-files:
-      scripts:
-      - docs/auto_docstring.py
-      #- docs/gen_ref_pages.py
-  - literate-nav:
-      nav_file: SUMMARY.md
-  - mkdocstrings:
-      default_handler: python
-      handlers:
-        python:
-          paths: [.]
-          options:
-            members_order: source
-            separate_signature: false
-            filters: ["!^_"]
-            docstring_options:
-              ignore_init_summary: true
-            merge_init_into_class: true
-  - section-index
-
-watch:
-  - langroid
-
-nav:
-  - Home: index.md
-  - Blog: blog/index.md
-  - Getting Started:
-    - quick-start/index.md
-    - Setup: quick-start/setup.md
-    - LLM interaction: quick-start/llm-interaction.md
-    - Simple Chat Agent: quick-start/chat-agent.md
-    - Task Delegation: quick-start/multi-agent-task-delegation.md
-    - Two Agent Chat: quick-start/two-agent-chat-num.md
-    - Three Agent Chat: quick-start/three-agent-chat-num.md
-    - Agent with Tools/Functions: quick-start/chat-agent-tool.md
-    - Three Agents, with Routing: quick-start/three-agent-chat-num-router.md
-    - Agent with Retrieval: quick-start/chat-agent-docs.md
-  # defer to gen-files + literate-nav
-  - FAQ: FAQ.md
-  - Notes-Updates:
-      - Overview: notes/overview.md
-      - XML-based Tools: notes/xml-tools.md
-      - Async Streaming: notes/async-streaming.md
-      - Knowledge Graphs: notes/knowledge-graphs.md
-      - Gemini LLMs, Embeddings, Vertex AI: notes/gemini.md
-      - LLM-based Pdf Parsing: notes/llm-pdf-parser.md
-      - Large Tool Results: notes/large-tool-results.md
-      - GLHF.chat Support: notes/glhf-chat.md
-      - Structured Output: notes/structured-output.md
-      - Tool Handlers: notes/tool-message-handler.md
-      - Task Termination: notes/task-termination.md
-      - Message Routing: notes/message-routing.md
-      - Llama.cpp Embeddings: notes/llama-cpp-embeddings.md
-      - Azure OpenAI models: notes/azure-openai-models.md
-      - Custom Azure OpenAI client: notes/custom-azure-client.md
-      - Enriching Chunks for Retrieval: notes/enriching-for-retrieval.md
-      - Reasoning Content: notes/reasoning-content.md
-      - Weaviate: notes/weaviate.md
-      - Handling LLM Non-Tool Messages: notes/handle-llm-no-tool.md
-      - PGVector: notes/pgvector.md
-      - Pinecone: notes/pinecone.md
-      - Tavily Search Tool: notes/tavily_search.md
-      - Seltz Search Tool: notes/seltz_search.md
-      - Twitter Search via Xquik MCP: notes/twitter-search.md
-      - Marker Pdf Parser: notes/marker-pdf.md
-      - URLLoader : notes/url_loader.md
-      - Crawl4AI Crawler: notes/crawl4ai.md
-      - LangDB AI Gateway: notes/langdb.md
-      - Portkey AI Gateway: notes/portkey.md
-      - Markitdown Parsers: notes/markitdown.md
-      - LiteLLM Proxy: notes/litellm-proxy.md
-      - Chunking: notes/chunking.md
-      - Image, PDF Input: notes/file-input.md
-      - MCP Tools: notes/mcp-tools.md
-      - Code-Injection Protection: notes/code-injection-protection.md
-      - TaskTool: notes/task-tool.md
-      - Local Qdrant VectorDB Cleanup: notes/qdrant-resource-cleanup.md
-      - OpenAI HTTP Client Configuration: notes/openai-http-client.md
-      - OpenAI Client Caching: notes/openai-client-caching.md
-      - Cross-Encoder Reranking: notes/cross-encoder.md
-      - Task Logs: notes/html-logger.md
-      - Pydantic v2 Migration: notes/pydantic-v2-migration.md
-
-  - Examples:
-    - Guide: examples/guide.md
-    - Hierarchical Agent Computation: examples/agent-tree.md
-    - Demos:
-      - Audience Targeting: demos/targeting/audience-targeting.md
-  - Tutorials:
-    - Langroid Tour: tutorials/langroid-tour.md
-    - Supported LLMs: tutorials/supported-models.md
-    - Local LLM Setup: tutorials/local-llm-setup.md
-    - Non-OpenAI LLMs: tutorials/non-openai-llms.md
-    - SQLChatAgent: tutorials/postgresql-agent.md
-    - LLM Usage Options: tutorials/llm-usage-options.md
-  - Code/API Docs: reference/
-#  - API Documentation:
-#    - language_models: api/language_models_base.md
-
-
-markdown_extensions:
-  - footnotes
-  - toc:
-      permalink: true
-  - attr_list
-  - md_in_html
-  - pymdownx.emoji:
-      emoji_index: !!python/name:material.extensions.emoji.twemoji
-      emoji_generator: !!python/name:material.extensions.emoji.to_svg
-  - admonition
-  - pymdownx.details
-  - pymdownx.superfences
-  - pymdownx.highlight:
-      anchor_linenums: true
-      line_spans: __span
-      pygments_lang_class: true
-      use_pygments: true
-  - pymdownx.inlinehilite
-  - pymdownx.snippets
-  - pymdownx.arithmatex:
-      generic: true
-  - markdown.extensions.attr_list:
-extra_javascript:
-  - javascripts/mathjax.js
-  - https://polyfill.io/v3/polyfill.min.js?features=es6
-  - https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-mml-chtml.js
 </file>
 
 <file path="README.md">

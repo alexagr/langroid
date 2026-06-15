@@ -626,6 +626,7 @@ class Agent(ABC):
         oai_tool_id2result: OrderedDict[str, str] | None = None,
         function_call: LLMFunctionCall | None = None,
         recipient: str = "",
+        tainted: bool = False,
     ) -> ChatDocument:
         """Template for agent_response."""
         return self.response_template(
@@ -639,6 +640,7 @@ class Agent(ABC):
             oai_tool_id2result=oai_tool_id2result,
             function_call=function_call,
             recipient=recipient,
+            tainted=tainted,
         )
 
     def render_agent_response(
@@ -883,6 +885,7 @@ class Agent(ABC):
         oai_tool_id2result: OrderedDict[str, str] | None = None,
         function_call: LLMFunctionCall | None = None,
         recipient: str = "",
+        tainted: bool = False,
     ) -> ChatDocument:
         """Template for response from entity `e`."""
         return ChatDocument(
@@ -909,6 +912,17 @@ class Agent(ABC):
                 # trusted here -- see issue #1035 for the taint-propagation fix.
                 tools_from_agent=bool(tool_messages)
                 and e in (Entity.LLM, Entity.AGENT),
+                # DISTRUST signal (#1035): set for any USER-origin response
+                # (external user input -- create_user_response / to_ChatDocument
+                # of a USER string), when the caller passes tainted=True, or when
+                # the response repackages an already-tainted tool (e.g.
+                # DonePassTool/AgentDoneTool re-emitting tools parsed from a USER
+                # message). The Task result-wrap relabel builds ChatDocMetaData
+                # directly (not via this template), so trusted agent->agent
+                # handoffs are unaffected.
+                tainted=tainted
+                or e == Entity.USER
+                or any(getattr(t, "_tainted", False) for t in tool_messages),
             ),
         )
 
@@ -995,6 +1009,9 @@ class Agent(ABC):
                     agent_id=self.id,
                     source=source,
                     sender=sender,
+                    # interactive user input is external untrusted input; SYSTEM
+                    # (operator) input is trusted (#1035)
+                    tainted=sender == Entity.USER,
                     # preserve trail of tool_ids for OpenAI Assistant fn-calls
                     tool_ids=tool_ids,
                 ),
@@ -1314,20 +1331,32 @@ class Agent(ABC):
         messages are returned unchanged, since their tools came from an LLM,
         not from raw user input.
 
-        Limitation: ``tools_from_agent`` is a message-origin signal and guards
-        only the *direct* case -- raw user input arriving at the agent that
-        receives it. It does NOT defend against an agent that deliberately
-        forwards/repackages untrusted user content into structured
-        ``tool_messages`` (e.g. an ``agent_response`` echoing ``msg.content``,
-        or ``DonePassTool``/``AgentDoneTool`` re-emitting tools parsed from a
-        USER message); such forwarding is the developer's responsibility. A
-        robust taint-propagation fix is tracked in issue #1035.
+        Defense in depth (#1035): external user input is marked
+        ``metadata.tainted`` (ChatDocument.from_str / to_ChatDocument), the mark
+        propagates through deepcopies and the ``DonePassTool``/``AgentDoneTool``
+        repackage path, and a tainted message has its handle-only tools dropped
+        here even when ``tools_from_agent`` is set and the sender was relabeled
+        to USER. This closes the known content-laundering path through those
+        orchestration tools.
+
+        Residual: taint cannot flow through an LLM generation, so an LLM that is
+        prompt-injected into emitting tool JSON in its *content* stays out of
+        scope (the LLM-trust boundary). Broadening taint to every mechanical
+        derivation is tracked in issue #1035.
 
         Non-``ChatDocument`` inputs and non-``USER`` senders are returned
         unchanged.
         """
         if not isinstance(msg, ChatDocument):
             return tools
+        if msg.metadata.tainted:
+            # Untrusted (USER-derived) content mechanically laundered into
+            # structured tools -- e.g. DonePassTool/AgentDoneTool re-emitting
+            # tools parsed from a USER message. Veto handle-only tools even when
+            # tools_from_agent is set and the sender was relabeled to USER. (#1035)
+            return [
+                t for t in tools if t.default_value("request") in self.llm_tools_usable
+            ]
         if msg.metadata.sender != Entity.USER:
             return tools
         if msg.metadata.tools_from_agent:
@@ -1970,6 +1999,8 @@ class Agent(ABC):
         is_agent_author = author_entity == Entity.AGENT
 
         if isinstance(msg, str):
+            # USER-author strings (e.g. Task.run user input) are tainted by
+            # response_template (#1035).
             return self.response_template(author_entity, content=msg, content_any=msg)
         elif isinstance(msg, ToolMessage):
             # result is a ToolMessage, so...
