@@ -1570,3 +1570,44 @@ async def test_get_tools_async_rejects_invalid_tool_name() -> None:
 
         with pytest.raises(ValueError, match="Invalid MCP tool name"):
             await client.get_tools_async()
+
+
+@pytest.mark.asyncio
+async def test_enum_field_becomes_literal() -> None:
+    """A JSON-Schema ``enum`` field maps to ``typing.Literal``: the generated
+    ToolMessage validates only the allowed values and echoes them back in its
+    schema. A ``Literal`` param on the server is emitted by fastmcp as an
+    ``enum`` in the tool's inputSchema, which the converter turns back into a
+    ``Literal``.
+    """
+    from typing import Literal, get_args, get_origin
+
+    from pydantic import ValidationError
+
+    server = FastMCP("EnumServer")
+
+    @server.tool()
+    def set_unit(
+        unit: Literal["celsius", "fahrenheit"],
+    ) -> str:
+        """Set the temperature unit."""
+        return unit
+
+    UnitTool = await get_tool_async(server, "set_unit")
+
+    # The generated field must be a Literal with exactly the allowed values.
+    annotation = UnitTool.model_fields["unit"].annotation
+    assert get_origin(annotation) is Literal
+    assert set(get_args(annotation)) == {"celsius", "fahrenheit"}
+
+    # Allowed value validates and round-trips.
+    msg = UnitTool(unit="celsius")
+    assert msg.unit == "celsius"
+
+    # Disallowed value is rejected by pydantic validation.
+    with pytest.raises(ValidationError):
+        UnitTool(unit="kelvin")
+
+    # The constraint is echoed into the LLM-facing JSON schema.
+    unit_schema = UnitTool.model_json_schema()["properties"]["unit"]
+    assert set(unit_schema.get("enum", [])) == {"celsius", "fahrenheit"}

@@ -5,7 +5,18 @@ import logging
 import os
 from base64 import b64decode
 from io import BytesIO
-from typing import Any, Callable, Dict, List, Optional, Tuple, Type, TypeAlias, cast
+from typing import (
+    Any,
+    Callable,
+    Dict,
+    List,
+    Literal,
+    Optional,
+    Tuple,
+    Type,
+    TypeAlias,
+    cast,
+)
 
 from dotenv import load_dotenv
 from fastmcp.client import Client
@@ -263,6 +274,22 @@ class FastMCPClient:
         else:
             default = ... if is_required else None
         desc = schema.get("description")
+        # Enum / const → Literal, but only for Literal-compatible scalar values
+        # (str/int/bool/None). This takes precedence over the plain `type`
+        # branches so the allowed values are preserved for validation and echoed
+        # back into the model's JSON schema (which the LLM sees). JSON-Schema
+        # enums may also hold floats or objects, which Literal rejects; those
+        # fall through to the type-based handling below.
+        enum_values = schema.get(
+            "enum", [schema["const"]] if "const" in schema else None
+        )
+        if enum_values and all(
+            isinstance(v, (str, int, bool)) or v is None for v in enum_values
+        ):
+            literal_type = Literal[tuple(enum_values)]  # type: ignore[valid-type]
+            if not is_required:
+                literal_type = Optional[literal_type]  # type: ignore[assignment]
+            return literal_type, Field(default=default, description=desc)
         # Object → nested BaseModel
         if t == "object" and "properties" in schema:
             sub_name = f"{prefix}_{name.capitalize()}"
