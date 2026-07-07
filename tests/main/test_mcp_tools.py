@@ -1611,3 +1611,40 @@ async def test_enum_field_becomes_literal() -> None:
     # The constraint is echoed into the LLM-facing JSON schema.
     unit_schema = UnitTool.model_json_schema()["properties"]["unit"]
     assert set(unit_schema.get("enum", [])) == {"celsius", "fahrenheit"}
+
+
+@pytest.mark.asyncio
+async def test_anyof_maps_to_union_and_optional() -> None:
+    """A JSON-Schema ``anyOf`` maps to ``typing.Union``; an ``anyOf`` that
+    includes ``{"type": "null"}`` (or an optional field) becomes ``Optional``.
+    fastmcp emits ``int | str`` and ``Optional[int]`` params as ``anyOf``.
+    """
+    from typing import Union, get_args, get_origin
+
+    server = FastMCP("UnionServer")
+
+    @server.tool()
+    def choose(value: int | str) -> str:
+        """Echo an int-or-str value."""
+        return str(value)
+
+    @server.tool()
+    def maybe(count: Optional[int] = None) -> str:
+        """Echo an optional count."""
+        return "none" if count is None else str(count)
+
+    # int | str  ->  Union[int, str]
+    ChooseTool = await get_tool_async(server, "choose")
+    choose_ann = ChooseTool.model_fields["value"].annotation
+    assert get_origin(choose_ann) is Union
+    assert set(get_args(choose_ann)) == {int, str}
+    assert ChooseTool(value=5).value == 5
+    assert ChooseTool(value="hi").value == "hi"
+
+    # Optional[int] (anyOf including null)  ->  Union[int, None]
+    MaybeTool = await get_tool_async(server, "maybe")
+    maybe_ann = MaybeTool.model_fields["count"].annotation
+    assert get_origin(maybe_ann) is Union
+    assert set(get_args(maybe_ann)) == {int, type(None)}
+    assert MaybeTool().count is None
+    assert MaybeTool(count=3).count == 3

@@ -15,6 +15,7 @@ from typing import (
     Tuple,
     Type,
     TypeAlias,
+    Union,
     cast,
 )
 
@@ -338,10 +339,39 @@ class FastMCPClient:
         if t == "boolean":
             bool_type = bool if is_required else Optional[bool]
             return bool_type, Field(default=default, description=desc)
-        # Fallback or unions
-        if any(key in schema for key in ("oneOf", "anyOf", "allOf")):
-            self.logger.warning("Unsupported union schema in field %s; using Any", name)
+        # anyOf / oneOf → Union (typing has no XOR, so oneOf also maps to
+        # Union). A `{"type": "null"}` branch — or an optional field — makes the
+        # result Optional. Each branch is converted recursively.
+        sub_schemas = schema.get("anyOf") or schema.get("oneOf")
+        if isinstance(sub_schemas, list) and sub_schemas:
+            non_null = [
+                s
+                for s in sub_schemas
+                if not (isinstance(s, dict) and s.get("type") == "null")
+            ]
+            has_null = len(non_null) != len(sub_schemas)
+            if non_null:
+                member_types = tuple(
+                    self._schema_to_field(name, s, prefix, is_required=True)[0]
+                    for s in non_null
+                )
+                union_type = Union[member_types]  # type: ignore
+                if has_null or not is_required:
+                    union_type = Optional[union_type]  # type: ignore
+                return union_type, Field(default=default, description=desc)
+
+        # allOf: a single subschema is just that schema; a multi-schema
+        # intersection has no clean typing analogue, so fall back to Any.
+        all_of = schema.get("allOf")
+        if isinstance(all_of, list) and len(all_of) == 1:
+            inner_type, _ = self._schema_to_field(
+                name, all_of[0], prefix, is_required=is_required
+            )
+            return inner_type, Field(default=default, description=desc)
+        if all_of:
+            self.logger.warning("Unsupported allOf schema in field %s; using Any", name)
             return Any, Field(default=default, description=desc)
+
         # Default fallback
         return Any, Field(default=default, description=desc)
 
