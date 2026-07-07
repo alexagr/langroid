@@ -1490,6 +1490,32 @@ def test_tool_model_from_mcp_tool_rejects_invalid_names() -> None:
         client.tool_model_from_mcp_tool(omitted_name_tool)
 
 
+def test_tool_model_from_mcp_tool_handles_malformed_enum() -> None:
+    """A non-list ``enum`` (malformed metadata, since JSON Schema requires an
+    array) must degrade to type-based handling instead of raising when we
+    iterate it — consistent with the converter's other defensive fallbacks.
+    """
+    client = FastMCPClient(mcp_server())
+    tool = Tool.model_construct(
+        name="malformed_enum",
+        description="Malformed enum",
+        inputSchema={
+            "properties": {
+                # `enum` is a bare scalar, not a list: must not raise.
+                "bad_enum": {"type": "integer", "enum": 1},
+            },
+            "required": ["bad_enum"],
+        },
+    )
+
+    tool_model = client.tool_model_from_mcp_tool(tool)
+
+    assert tool_model.default_value("request") == "malformed_enum"
+    assert "bad_enum" in tool_model.model_fields
+    # Falls through to the "integer" type branch, so an int still validates.
+    assert tool_model(bad_enum=5).bad_enum == 5
+
+
 def test_tool_model_from_mcp_tool_handles_malformed_property_schemas() -> None:
     """Malformed field schemas should degrade to permissive fields."""
     client = FastMCPClient(mcp_server())

@@ -284,8 +284,13 @@ class FastMCPClient:
         enum_values = schema.get(
             "enum", [schema["const"]] if "const" in schema else None
         )
-        if enum_values and all(
-            isinstance(v, (str, int, bool)) or v is None for v in enum_values
+        # `enum` must be a list per JSON Schema; guard against malformed
+        # metadata (e.g. a bare scalar) so it degrades to type-based handling
+        # instead of raising when we iterate.
+        if (
+            isinstance(enum_values, list)
+            and enum_values
+            and all(isinstance(v, (str, int, bool)) or v is None for v in enum_values)
         ):
             literal_type = Literal[tuple(enum_values)]  # type: ignore[valid-type]
             if not is_required:
