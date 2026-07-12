@@ -1674,3 +1674,87 @@ async def test_anyof_maps_to_union_and_optional() -> None:
     assert set(get_args(maybe_ann)) == {int, type(None)}
     assert MaybeTool().count is None
     assert MaybeTool(count=3).count == 3
+
+
+@pytest.mark.asyncio
+async def test_literal_union_convert_to_openai_tool_spec() -> None:
+    """End-to-end: a tool whose params map to ``Literal``/``Union`` must convert
+    cleanly into the OpenAI-facing tool definition.
+
+    The other schema tests stop at pydantic's raw ``model_json_schema()``; this
+    one exercises the layers that actually build the schema sent to the LLM:
+    langroid's ``ToolMessage.llm_function_schema()`` and the strict
+    structured-outputs transform ``format_schema_for_strict()``. Those rebuild
+    ``required``, strip ``title``/``additionalProperties``, and rewrite
+    ``oneOf``/``allOf`` -> ``anyOf``, so ``enum``/``anyOf`` must survive intact.
+    """
+    import copy
+    from typing import Literal
+
+    from langroid.agent.tool_message import format_schema_for_strict
+
+    server = FastMCP("ToolSpecServer")
+
+    @server.tool()
+    def configure(
+        color: Literal["red", "green", "blue"],
+        quantity: int | str,
+        size: Optional[Literal["S", "M", "L"]] = None,
+    ) -> str:
+        """Configure things."""
+        return "ok"
+
+    ConfigureTool = await get_tool_async(server, "configure")
+
+    # --- non-strict: the default OpenAI function/tool definition ---
+    params = ConfigureTool.llm_function_schema(request=True).parameters
+    props = params["properties"]
+
+    # Literal -> enum preserved
+    assert set(props["color"]["enum"]) == {"red", "green", "blue"}
+
+    # Union[int, str] -> anyOf preserved, with both branches
+    assert {b.get("type") for b in props["quantity"]["anyOf"]} == {
+        "integer",
+        "string",
+    }
+
+    # Optional[Literal] -> anyOf including a null branch, with the enum retained
+    size_branches = props["size"]["anyOf"]
+    assert {"type": "null"} in size_branches
+    assert any(set(b.get("enum", [])) == {"S", "M", "L"} for b in size_branches)
+
+    # required: mandatory params + request, but NOT the optional `size`
+    assert set(params["required"]) == {"color", "quantity", "request"}
+
+    # --- strict mode: must yield a valid structured-outputs schema ---
+    strict = copy.deepcopy(params)
+    format_schema_for_strict(strict)
+
+    # every object is closed (additionalProperties=False) and fully required,
+    # and OpenAI strict mode forbids oneOf/allOf (both rewritten to anyOf).
+    def assert_strict(node: Any) -> None:
+        if isinstance(node, dict):
+            if node.get("type") == "object":
+                assert node.get("additionalProperties") is False
+                assert set(node.get("required", [])) == set(
+                    node.get("properties", {}).keys()
+                )
+            assert "oneOf" not in node
+            assert "allOf" not in node
+            for v in node.values():
+                assert_strict(v)
+        elif isinstance(node, list):
+            for v in node:
+                assert_strict(v)
+
+    assert_strict(strict)
+
+    # enum/anyOf survive the strict transform, and ALL props (incl. the
+    # now-required `size`) are marked required.
+    assert set(strict["properties"]["color"]["enum"]) == {"red", "green", "blue"}
+    assert {b.get("type") for b in strict["properties"]["quantity"]["anyOf"]} == {
+        "integer",
+        "string",
+    }
+    assert set(strict["required"]) == {"color", "quantity", "size", "request"}
