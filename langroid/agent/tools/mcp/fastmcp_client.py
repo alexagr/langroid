@@ -66,6 +66,10 @@ FastMCPServerSpec: TypeAlias = (
     FastMCPServerConcrete | Callable[[], FastMCPServerConcrete]
 )
 
+# Sentinel marking a $defs entry that is currently being resolved into a model,
+# used to break reference cycles when converting JSON-Schema $ref nodes.
+_REF_IN_PROGRESS = object()
+
 
 class FastMCPClient:
     """A client for interacting with a FastMCP server.
@@ -250,7 +254,13 @@ class FastMCPClient:
             )
 
     def _schema_to_field(
-        self, name: str, schema: Any, prefix: str, is_required: bool = True
+        self,
+        name: str,
+        schema: Any,
+        prefix: str,
+        is_required: bool = True,
+        defs: Optional[Dict[str, Any]] = None,
+        ref_cache: Optional[Dict[str, Any]] = None,
     ) -> Tuple[Any, Any]:
         """Convert a JSON Schema snippet into a (type, Field) tuple.
 
@@ -259,10 +269,22 @@ class FastMCPClient:
             schema: JSON Schema for this field.
             prefix: Prefix to use for nested model names.
             is_required: Whether this field is required (from JSON Schema "required").
+            defs: The tool schema's ``$defs`` registry, used to resolve ``$ref``
+                nodes into nested models. fastmcp emits pydantic-model params
+                (and their nested/union/array members) as a local ``$ref`` into
+                ``$defs``.
+            ref_cache: Per-tool cache mapping a ``$defs`` name to its already
+                built type, so shared models are reused and reference cycles can
+                be detected (a name mapped to ``_REF_IN_PROGRESS`` is currently
+                being resolved).
 
         Returns:
             A tuple of (python_type, Field(...)) for create_model.
         """
+        if defs is None:
+            defs = {}
+        if ref_cache is None:
+            ref_cache = {}
         if not isinstance(schema, dict):
             default = ... if is_required else None
             return Any, Field(default=default)
@@ -275,6 +297,37 @@ class FastMCPClient:
         else:
             default = ... if is_required else None
         desc = schema.get("description")
+        # $ref → resolve against $defs and build a nested model. fastmcp emits
+        # pydantic-model params (and nested/union/array members) as a local
+        # ``$ref`` like "#/$defs/Address"; without resolution these degrade to
+        # the permissive `Any` fallback below. A ref to an unknown def, or one
+        # hit while that same def is still being resolved (a cycle), falls back
+        # to `Any`. Resolved types are cached per tool so shared defs are built
+        # once and reused.
+        ref = schema.get("$ref")
+        if isinstance(ref, str):
+            def_name = ref.rsplit("/", 1)[-1]
+            if def_name in ref_cache:
+                cached = ref_cache[def_name]
+                if cached is _REF_IN_PROGRESS:
+                    return Any, Field(default=default, description=desc)
+                ref_type = cached if is_required else Optional[cached]
+                return ref_type, Field(default=default, description=desc)
+            resolved = defs.get(def_name)
+            if not isinstance(resolved, dict):
+                return Any, Field(default=default, description=desc)
+            ref_cache[def_name] = _REF_IN_PROGRESS
+            built, _ = self._schema_to_field(
+                def_name,
+                resolved,
+                prefix,
+                is_required=True,
+                defs=defs,
+                ref_cache=ref_cache,
+            )
+            ref_cache[def_name] = built
+            ref_type = built if is_required else Optional[built]
+            return ref_type, Field(default=default, description=desc)
         # Enum / const → Literal, but only for Literal-compatible scalar values
         # (str/int/bool/None). This takes precedence over the plain `type`
         # branches so the allowed values are preserved for validation and echoed
@@ -312,7 +365,12 @@ class FastMCPClient:
             }
             for k, sub_s in nested_properties.items():
                 ftype, fld = self._schema_to_field(
-                    sub_name + k, sub_s, sub_name, is_required=k in nested_required
+                    sub_name + k,
+                    sub_s,
+                    sub_name,
+                    is_required=k in nested_required,
+                    defs=defs,
+                    ref_cache=ref_cache,
                 )
                 sub_fields[k] = (ftype, fld)
             submodel = create_model(  # type: ignore
@@ -326,7 +384,9 @@ class FastMCPClient:
         # Array → List of items
         if t == "array" and "items" in schema:
             items_schema = schema.get("items")
-            item_type, _ = self._schema_to_field(name, items_schema, prefix)
+            item_type, _ = self._schema_to_field(
+                name, items_schema, prefix, defs=defs, ref_cache=ref_cache
+            )
             array_type = List[item_type]  # type: ignore
             if not is_required:
                 array_type = Optional[array_type]  # type: ignore
@@ -357,7 +417,14 @@ class FastMCPClient:
             has_null = len(non_null) != len(sub_schemas)
             if non_null:
                 member_types = tuple(
-                    self._schema_to_field(name, s, prefix, is_required=True)[0]
+                    self._schema_to_field(
+                        name,
+                        s,
+                        prefix,
+                        is_required=True,
+                        defs=defs,
+                        ref_cache=ref_cache,
+                    )[0]
                     for s in non_null
                 )
                 union_type = Union[member_types]  # type: ignore
@@ -370,7 +437,12 @@ class FastMCPClient:
         all_of = schema.get("allOf")
         if isinstance(all_of, list) and len(all_of) == 1:
             inner_type, _ = self._schema_to_field(
-                name, all_of[0], prefix, is_required=is_required
+                name,
+                all_of[0],
+                prefix,
+                is_required=is_required,
+                defs=defs,
+                ref_cache=ref_cache,
             )
             return inner_type, Field(default=default, description=desc)
         if all_of:
@@ -423,6 +495,15 @@ class FastMCPClient:
         props = schema.get("properties") or {}
         if not isinstance(props, dict):
             props = {}
+        # Registry of shared subschemas ($defs), used to resolve $ref nodes such
+        # as pydantic-model params. Captured before the loop below shadows
+        # `schema` with each property's schema.
+        defs = schema.get("$defs")
+        if not isinstance(defs, dict):
+            defs = {}
+        # Cache of resolved $ref types, shared across all properties so a def
+        # referenced by several params is built once and reused.
+        ref_cache: Dict[str, Any] = {}
         # Get the list of required fields from JSON Schema
         required_fields = schema.get("required") or []
         if not isinstance(required_fields, list):
@@ -433,7 +514,12 @@ class FastMCPClient:
         fields: Dict[str, Tuple[type, Any]] = {}
         for fname, schema in props.items():
             ftype, fld = self._schema_to_field(
-                fname, schema, tool_name, is_required=fname in required_field_names
+                fname,
+                schema,
+                tool_name,
+                is_required=fname in required_field_names,
+                defs=defs,
+                ref_cache=ref_cache,
             )
             fields[fname] = (ftype, fld)
 

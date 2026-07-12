@@ -1758,3 +1758,138 @@ async def test_literal_union_convert_to_openai_tool_spec() -> None:
         "string",
     }
     assert set(strict["required"]) == {"color", "quantity", "size", "request"}
+
+
+@pytest.mark.asyncio
+async def test_nested_model_param_resolves_ref() -> None:
+    """A pydantic-model tool param is emitted by fastmcp as a ``$ref`` into
+    ``$defs``. The converter resolves it into a nested model (instead of
+    degrading to ``Any``), so nested data validates and the constraint is
+    echoed into the LLM-facing schema as ``$defs``/``$ref``.
+    """
+    from pydantic import ValidationError
+
+    class Geo(BaseModel):
+        lat: float
+        lon: float
+
+    class Address(BaseModel):
+        street: str
+        zip_code: int
+        geo: Optional[Geo] = None
+
+    server = FastMCP("NestedServer")
+
+    @server.tool()
+    def set_address(address: Address) -> str:
+        """Set an address."""
+        return address.street
+
+    AddrTool = await get_tool_async(server, "set_address")
+
+    # The `address` field is a real nested model, not Any.
+    addr_type = AddrTool.model_fields["address"].annotation
+    assert isinstance(addr_type, type) and issubclass(addr_type, BaseModel)
+
+    # Nested (incl. doubly-nested Geo) data validates and coerces into models.
+    msg = AddrTool(
+        address={"street": "Main", "zip_code": 12345, "geo": {"lat": 1.0, "lon": 2.0}}
+    )
+    assert msg.address.street == "Main"
+    assert msg.address.geo is not None and msg.address.geo.lat == 1.0
+
+    # A missing required nested field is rejected by validation.
+    with pytest.raises(ValidationError):
+        AddrTool(address={"street": "Main"})  # zip_code missing
+
+    # The LLM-facing tool schema resolves the model via $defs/$ref, not Any.
+    params = AddrTool.llm_function_schema(request=True).parameters
+    assert "$ref" in params["properties"]["address"]
+    ref_name = params["properties"]["address"]["$ref"].split("/")[-1]
+    assert ref_name in params["$defs"]
+
+
+@pytest.mark.asyncio
+async def test_union_and_list_of_model_params_resolve_refs() -> None:
+    """``$ref`` nodes inside ``anyOf`` (union of models) and ``items`` (list of
+    models) are resolved into nested models too.
+    """
+    from typing import Union, get_args, get_origin
+
+    class Address(BaseModel):
+        street: str
+        zip_code: int
+
+    class POBox(BaseModel):
+        box: int
+
+    server = FastMCP("UnionModelServer")
+
+    @server.tool()
+    def deliver(loc: Union[Address, POBox]) -> str:
+        """Deliver to one of two location kinds."""
+        return "ok"
+
+    @server.tool()
+    def deliver_many(addrs: List[Address]) -> str:
+        """Deliver to many addresses."""
+        return "ok"
+
+    # Union[Address, POBox] -> Union of two nested models
+    DeliverTool = await get_tool_async(server, "deliver")
+    loc_ann = DeliverTool.model_fields["loc"].annotation
+    assert get_origin(loc_ann) is Union
+    members = get_args(loc_ann)
+    assert all(isinstance(m, type) and issubclass(m, BaseModel) for m in members)
+    assert DeliverTool(loc={"box": 7}).loc.box == 7
+    assert DeliverTool(loc={"street": "Main", "zip_code": 1}).loc.street == "Main"
+
+    # List[Address] -> List of a nested model
+    ManyTool = await get_tool_async(server, "deliver_many")
+    addrs_ann = ManyTool.model_fields["addrs"].annotation
+    assert get_origin(addrs_ann) is list
+    (item_type,) = get_args(addrs_ann)
+    assert isinstance(item_type, type) and issubclass(item_type, BaseModel)
+    msg = ManyTool(
+        addrs=[{"street": "A", "zip_code": 1}, {"street": "B", "zip_code": 2}]
+    )
+    assert [a.street for a in msg.addrs] == ["A", "B"]
+
+
+def test_self_referential_model_param_breaks_ref_cycle() -> None:
+    """A ``$defs`` entry that references itself must not recurse forever: the
+    cyclic edge degrades to ``Any`` while the rest of the model is built. Uses
+    a hand-built schema so the cycle is exercised deterministically.
+    """
+    client = FastMCPClient(mcp_server())
+    tool = Tool.model_construct(
+        name="walk",
+        description="Walk a tree.",
+        inputSchema={
+            "$defs": {
+                "Node": {
+                    "type": "object",
+                    "properties": {
+                        "val": {"type": "integer"},
+                        # self-reference: must not loop forever
+                        "child": {"$ref": "#/$defs/Node"},
+                    },
+                    "required": ["val"],
+                }
+            },
+            "properties": {"root": {"$ref": "#/$defs/Node"}},
+            "required": ["root"],
+            "type": "object",
+        },
+    )
+
+    tool_model = client.tool_model_from_mcp_tool(tool)
+
+    root_type = tool_model.model_fields["root"].annotation
+    assert isinstance(root_type, type) and issubclass(root_type, BaseModel)
+    # Non-cyclic field is preserved with its real type.
+    assert root_type.model_fields["val"].annotation is int
+    # Nested data still validates; the cyclic `child` edge is permissive (Any).
+    inst = tool_model(root={"val": 1, "child": {"val": 2}})
+    assert inst.root.val == 1
+    assert inst.root.child == {"val": 2}
