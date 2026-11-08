@@ -1837,6 +1837,38 @@ class OpenAIGPT(LanguageModel):
             usage,
         )
 
+    @staticmethod
+    def _read_rest_of_stream(events: Iterator[Any]) -> None:
+        """Read what is left of a stream once `_stream_response` stops reading it;
+        see `_read_rest_of_stream_async`."""
+        try:
+            for _ in events:
+                pass
+        except Exception as e:
+            logging.debug("Error while reading the rest of a stream response: %s", e)
+
+    @staticmethod
+    async def _read_rest_of_stream_async(events: AsyncIterator[Any]) -> None:
+        """
+        Read what is left of a stream once `_stream_response_async` stops reading it.
+
+        The loop stops at the usage chunk (at the finish chunk when not streaming),
+        which still leaves the end of the HTTP body unread: the SSE `[DONE]` event
+        and the chunked-encoding terminator. A response left unread is only closed
+        when its stream is garbage-collected - on HTTP/1.1 that drops its connection,
+        so the next request pays a new TCP + TLS handshake instead of reusing it, and
+        on openai 3.x asyncio may log "aclose(): asynchronous generator is already
+        running" as it finalizes the stream. Read past `[DONE]`, the OpenAI SDK reads
+        the rest of the body itself (openai>=3.30) and the connection goes back to the
+        pool. A stream that already ended or failed has nothing left to read, and a
+        failure here costs only the connection: the response is already complete.
+        """
+        try:
+            async for _ in events:
+                pass
+        except Exception as e:
+            logging.debug("Error while reading the rest of a stream response: %s", e)
+
     @retry_with_exponential_backoff
     def _stream_response(  # type: ignore
         self, response, chat: bool = False
@@ -1866,8 +1898,10 @@ class OpenAIGPT(LanguageModel):
         in_reasoning: bool = False  # Track if we're inside reasoning delimiters
         content_present = False
         finish_reason: Optional[str] = None
+        # one iterator, so that what the loop leaves unread can be read on after it
+        events = iter(response)
         try:
-            for event in response:
+            for event in events:
                 event_dict = event if isinstance(event, dict) else event.model_dump()
                 choices = event_dict.get("choices") or []
                 if choices and choices[0].get("finish_reason"):
@@ -1910,6 +1944,7 @@ class OpenAIGPT(LanguageModel):
 
         except Exception as e:
             logging.warning("Error while processing stream response: %s", str(e))
+        self._read_rest_of_stream(events)
 
         if not settings.quiet:
             print("")
@@ -1958,8 +1993,10 @@ class OpenAIGPT(LanguageModel):
         in_reasoning: bool = False  # Track if we're inside reasoning delimiters
         content_present = False
         finish_reason: Optional[str] = None
+        # one iterator, so that what the loop leaves unread can be read on after it
+        events = aiter(response)
         try:
-            async for event in response:
+            async for event in events:
                 event_dict = event if isinstance(event, dict) else event.model_dump()
                 choices = event_dict.get("choices") or []
                 if choices and choices[0].get("finish_reason"):
@@ -2002,6 +2039,7 @@ class OpenAIGPT(LanguageModel):
 
         except Exception as e:
             logging.warning("Error while processing stream response: %s", str(e))
+        await self._read_rest_of_stream_async(events)
 
         if not settings.quiet:
             print("")
